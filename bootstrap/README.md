@@ -1,8 +1,5 @@
 # Cluster Bootstrap (Terraform)
 
-Minimal Terraform to solve the chicken-and-egg problem. After bootstrap,
-Flux manages its own upgrades and ACK manages the cluster.
-
 ## Prerequisites
 
 - Terraform >= 1.5
@@ -15,7 +12,14 @@ Flux manages its own upgrades and ACK manages the cluster.
 
 ## First-Time Bootstrap
 
-### 1. Vendor the Flux chart
+### 1. Create the Terraform state backend
+
+```bash
+cd test-infra/bootstrap
+./scripts/bootstrap-backend.sh
+```
+
+### 2. Vendor the Flux chart
 
 ```bash
 cd test-infra
@@ -25,7 +29,7 @@ git commit -m "chore(flux): vendor flux2 chart"
 git push
 ```
 
-### 2. Create required AWS Secrets Manager secrets
+### 3. Create required AWS Secrets Manager secrets
 
 Prow requires the following secrets to exist before deployment:
 
@@ -56,7 +60,7 @@ aws secretsmanager create-secret \
   --secret-string '{"username":"<GITHUB_USER>","accessToken":"<GITHUB_PAT>"}'
 ```
 
-### 3. Generate your environment
+### 4. Generate your environment
 
 ```bash
 cd test-infra/bootstrap
@@ -66,7 +70,7 @@ cd test-infra/bootstrap
 This prompts for each variable (region, flux version, GitHub org/repo/branch)
 and writes a `.tfvars` file to `bootstrap/environment/dev.tfvars`.
 
-### 4. Bootstrap the cluster
+### 5. Bootstrap the cluster
 
 ```bash
 cd test-infra/bootstrap
@@ -74,108 +78,28 @@ terraform init
 terraform apply -var-file=environment/dev.tfvars
 ```
 
-This will:
-- Create a VPC and EKS Auto Mode cluster (with the built-in `general-purpose` NodePool enabled to bootstrap Flux)
-- Install Flux from the vendored chart
-- Create the ACK EKS capability
-- Build and push the `prow-build-prow-images` builder image to public ECR
-- Create a public ECR repository for all Prow images
-- Deploy ConfigMaps that bridge Terraform outputs to Flux
+### 6. Create ACM certificate for Prow domain
 
-Once Flux is running, it reconciles the ACK `Cluster` resource, which disables
-the built-in `general-purpose` NodePool and the custom `prow-compute` NodePool
-(c6a.8xlarge) takes over. This handoff happens automatically within a few
-minutes of the cluster becoming ready.
-
-### 4. Verify deployment
+The ALB requires a TLS certificate matching the Prow domain. Run this after
+the `ack-prow` kustomization is Ready (it creates the Route53 hosted zone):
 
 ```bash
-# Configure kubectl
-$(terraform output -raw kubeconfig_command)
-
-# Verify Flux is syncing
-kubectl get kustomizations -A
-
-# Verify ACK resources are healthy
-kubectl get role.iam,capability.eks,cluster.eks,accessentry.eks -n ack-system
-
-# Verify Prow is running (after prow.yaml is enabled)
-kubectl get pods -n prow
+./scripts/setup-acm-cert.sh <prow-domain> us-west-2
+# e.g. ./scripts/setup-acm-cert.sh gustidia.people.aws.dev us-west-2
 ```
 
-### 5. Configure GitHub webhook
+The script is idempotent — re-running skips already-issued certs. The ALB
+auto-discovers the certificate by matching the ingress host.
 
-After Prow is deployed, retrieve the webhook endpoint:
+### 7. Configure GitHub webhook
 
-```bash
-# Get the hook service hostname
-HOOK_HOST=$(kubectl get svc hook -n prow -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-echo "Webhook URL: http://${HOOK_HOST}:8888/hook"
-```
+After Prow is deployed, configure the GitHub App/org webhook to use the Prow
+domain (set via the `prow_domain` variable):
 
-Configure your GitHub App/org webhook to:
-- **URL:** `http://<hostname>:8888/hook`
+- **URL:** `https://<prow_domain>/hook` (e.g., `https://prow.ack.aws.dev/hook`)
 - **Content type:** `application/json`
 - **Secret:** same value used in `ack/prow/hmac-token` secret
 
-> **Note:** The webhook endpoint changes each time the cluster is recreated.
-> After a fresh bootstrap, update the GitHub webhook URL with the new hostname.
-
-## Accessing Grafana
-
-```bash
-# Get the Grafana endpoint
-kubectl get svc -n prometheus prometheus-prometheus-grafana \
-  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
-```
-
-## Accessing Deck UI
-
-```bash
-# Get the Deck endpoint
-kubectl get svc -n prow deck \
-  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
-```
-
-## Architecture
-
-### What Terraform owns (bootstrap only)
-
-| Resource | Purpose |
-|----------|---------|
-| VPC + subnets | Network foundation |
-| EKS cluster | Compute platform |
-| ACK capability + bootstrap IAM role | Enables ACK self-management |
-| Flux (vendored Helm chart) | GitOps engine |
-| GitRepository + Kustomization | Flux sync configuration |
-| `self-managed-vars` ConfigMap | Bridges Terraform outputs → Flux |
-| Public ECR repository | Prow image storage |
-| Webhook security group | GitHub → Prow connectivity |
-| Builder image push | Seeds the image build pipeline |
-
-### What Flux/ACK own (day-2)
-
-| What | Where |
-|------|-------|
-| Flux upgrades | `flux/flux-self/helm-release.yaml` |
-| Cluster config (logging, version) | `flux/self-managed/cluster.yaml` |
-| Access entries | `flux/self-managed/access-entries.yaml` |
-| EKS addons | `flux/self-managed/addons.yaml` |
-| ACK capability role (full perms) | `flux/self-managed/prereqs/ack-capability-role.yaml` |
-| Prow IAM roles + Pod Identities | `flux/self-managed/prow-iam-roles.yaml` |
-| Prow image builds | `flux/prow-build-images/build-job.yaml` |
-| Prow deployment | `flux/prow-charts/` |
-| S3 bucket, ECR pull-through cache | `flux/self-managed/` |
-
-### Dependency chain
-
-```
-Terraform bootstrap
-    ↓
-flux-self → self-managed-prereqs → self-managed-capability → self-managed-cluster → self-managed-pod-identities
-                                                                    ↓
-                                                              prow-crds → prow-build-images → prow-charts
-```
 
 ## Upgrading Flux
 
@@ -195,43 +119,23 @@ git push
 
 ## Re-running Terraform
 
-Safe to re-run anytime. Only needed when:
-- Rebuilding the cluster from scratch
-- Adding new values to the `self-managed-vars` ConfigMap
-- Changing VPC/networking or security groups
-
 ```bash
 terraform apply -var-file=environment/dev.tfvars
 ```
 
 ## Tearing Down
 
-The stack includes a `null_resource.flux_suspend` that automatically strips
-Flux finalizers before Helm uninstalls the controllers. This should allow a
-clean one-shot destroy:
-
 ```bash
 cd test-infra/bootstrap
-terraform destroy -var-file=environment/dev.tfvars
+terraform destroy
 ```
 
-### If destroy gets stuck
+## Cleaning Up the State Backend
 
-If the destroy hangs (e.g., from a previous partial destroy where controllers
-are already gone), remove the in-cluster resources from state and retry:
+After destroying all infrastructure, you can remove the Terraform state backend.
+This is irreversible — only do this if you're fully decommissioning the environment.
 
 ```bash
 cd test-infra/bootstrap
-
-# Remove in-cluster resources that block destroy
-terraform state rm helm_release.flux
-terraform state rm kubernetes_namespace_v1.flux_system
-terraform state rm kubernetes_namespace_v1.ack_system
-terraform state rm kubectl_manifest.flux_git_source
-terraform state rm kubectl_manifest.flux_kustomization
-terraform state rm kubernetes_config_map_v1.self_managed_vars
-terraform state rm kubernetes_config_map_v1.flux_version
-
-# Destroy everything else
-terraform destroy
+./scripts/cleanup-backend.sh
 ```

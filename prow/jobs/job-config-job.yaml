@@ -77,7 +77,7 @@ spec:
         - name: workspace
           mountPath: /workspace
       - name: substitute-and-gzip
-        image: alpine:3.20
+        image: public.ecr.aws/docker/library/alpine:3.21
         command:
         - /bin/sh
         - -ec
@@ -87,7 +87,7 @@ spec:
           echo "Substituting variables in jobs.yaml..."
           # Substitute only the 4 variables needed for Prow job configuration.
           # The $$ prefix is escaped by Flux postBuild (becomes $ after substitution).
-          envsubst '$$TEST_INFRA_ORG $$TEST_INFRA_REPO $$TEST_INFRA_BRANCH $$PROW_IMAGE_REPO' \
+          envsubst '$$TEST_INFRA_ORG $$TEST_INFRA_REPO $$TEST_INFRA_BRANCH $$PROW_IMAGES_REPO_URI' \
             < /workspace/prow/jobs/jobs.yaml \
             > /output/jobs-substituted.yaml
 
@@ -112,8 +112,8 @@ spec:
           value: "${TEST_INFRA_REPO}"
         - name: TEST_INFRA_BRANCH
           value: "${TEST_INFRA_BRANCH}"
-        - name: PROW_IMAGE_REPO
-          value: "${PROW_IMAGE_REPO}"
+        - name: PROW_IMAGES_REPO_URI
+          value: "${PROW_IMAGES_REPO_URI}"
         volumeMounts:
         - name: workspace
           mountPath: /workspace
@@ -121,7 +121,7 @@ spec:
           mountPath: /output
       containers:
       - name: apply-configmap
-        image: bitnami/kubectl:latest
+        image: public.ecr.aws/bitnami/kubectl:latest
         command:
         - /bin/bash
         - -ec
