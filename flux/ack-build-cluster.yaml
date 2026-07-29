@@ -1,0 +1,43 @@
+# Build-cluster ACK resources (all-ACK, same-account staging).
+#
+# STAGED ROLLOUT. This file is wired into flux/kustomization.yaml, but only the
+# infra Kustomization is defined for now (Stage 1). Day-2 Kustomizations
+# (access-entries, addons, pod-identities) are added in a later stage once the
+# cluster + network are verified ACTIVE.
+#
+# All-ACK: unlike the control-plane cluster (Terraform shell + ACK day-2), the
+# build cluster is provisioned end-to-end by ACK — the EC2/EKS/IAM controllers
+# on the control-plane cluster create the VPC, subnets, NAT, roles, and cluster
+# from the CRs in ./flux/ack/build-cluster/infra. No Terraform.
+#
+# dependsOn ack-capability + ack-capability-role: the infra CRs need the
+# capability role's widened EKS scope (${STACK_NAME}-*cluster) + the
+# EC2Management policy (flux/ack/capability/role/ack-capability-role.yaml).
+# Depending on the role Kustomization guarantees those permissions land before
+# ACK attempts any creates.
+
+# --- Build Cluster Infrastructure (VPC, subnets, NAT, roles, cluster) ---
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: ack-build-infra
+  namespace: flux-system
+spec:
+  interval: 60m
+  sourceRef:
+    kind: GitRepository
+    name: test-infra
+  path: ./flux/ack/build-cluster/infra
+  prune: true
+  deletionPolicy: WaitForTermination
+  targetNamespace: ack-system
+  postBuild:
+    substituteFrom:
+    - kind: ConfigMap
+      name: self-managed-vars
+  dependsOn:
+  - name: ack-capability
+  - name: ack-capability-role
+  wait: true
+  timeout: 30m
