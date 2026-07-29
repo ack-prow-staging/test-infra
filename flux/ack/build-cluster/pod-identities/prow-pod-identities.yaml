@@ -1,0 +1,32 @@
+# Build cluster Pod Identity Associations (Phase 1: same-account).
+#
+# Reconciled against the AWS API by the control-plane ACK EKS controller; they
+# bind a build-cluster service account to an IAM role via standard Pod Identity
+# (pods.eks.amazonaws.com). In Phase 1 the roles already exist in this account
+# (created for the control-plane cluster in
+# flux/ack/cluster/pod-identities/roles/prow-iam-roles.yaml), so we reuse them
+# by ARN — no new roles/ tree here. Phase 2 (separate account) will recreate the
+# roles in the build account.
+#
+# Only pre-submit-service-account is bound: the build cluster runs pre-submit
+# jobs exclusively (post-submit/periodic/mirror stay on the control-plane
+# `default` cluster), and keeping the identity surface minimal is the point of
+# isolating untrusted PR code here.
+#
+# The cross-account test-role assume (Path 1) is authorized at the account level
+# by the same account-scoped trust the test roles already grant today — same
+# account in Phase 1, so it works unchanged — not by anything on the
+# build-cluster side.
+---
+apiVersion: eks.services.k8s.aws/v1alpha1
+kind: PodIdentityAssociation
+metadata:
+  name: prow-build-presubmit-pod-identity
+  namespace: ack-system
+spec:
+  clusterRef:
+    from:
+      name: build-cluster
+  namespace: test-pods
+  serviceAccount: pre-submit-service-account
+  roleARN: arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-prow-presubmit-role

@@ -1,22 +1,23 @@
 # Build-cluster ACK resources (all-ACK, same-account staging).
 #
-# STAGED ROLLOUT. This file is wired into flux/kustomization.yaml, but only the
-# infra Kustomization is defined for now (Stage 1). Day-2 Kustomizations
-# (access-entries, addons, pod-identities) are added in a later stage once the
-# cluster + network are verified ACTIVE.
+# A single Flux Kustomization reconciles the whole build-cluster tree
+# (./flux/ack/build-cluster): the infra sub-tree (VPC/subnets/NAT/roles/cluster)
+# plus the day-2 CRs (access entries, pod identities). Ordering between them is
+# handled entirely by ACK reference resolution, NOT by Flux dependsOn: every
+# day-2 CR uses clusterRef → the create-path Cluster CR, and ACK blocks the
+# AccessEntry/PodIdentityAssociation creates until that Cluster reports
+# ACK.ResourceSynced=True (i.e. status ACTIVE). So a second gated Kustomization
+# is unnecessary — the ref waits for ACTIVE on its own.
 #
 # All-ACK: unlike the control-plane cluster (Terraform shell + ACK day-2), the
 # build cluster is provisioned end-to-end by ACK — the EC2/EKS/IAM controllers
 # on the control-plane cluster create the VPC, subnets, NAT, roles, and cluster
-# from the CRs in ./flux/ack/build-cluster/infra. No Terraform.
+# from these CRs. No Terraform.
 #
-# dependsOn ack-capability + ack-capability-role: the infra CRs need the
-# capability role's widened EKS scope (${STACK_NAME}-*cluster) + the
-# EC2Management policy (flux/ack/capability/role/ack-capability-role.yaml).
-# Depending on the role Kustomization guarantees those permissions land before
-# ACK attempts any creates.
-
-# --- Build Cluster Infrastructure (VPC, subnets, NAT, roles, cluster) ---
+# dependsOn ack-capability + ack-capability-role: the CRs need the capability
+# role's widened EKS scope (${STACK_NAME}-*cluster) + the EC2Management policy
+# (flux/ack/capability/role/ack-capability-role.yaml). Depending on the role
+# Kustomization guarantees those permissions land before ACK attempts creates.
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
@@ -28,7 +29,7 @@ spec:
   sourceRef:
     kind: GitRepository
     name: test-infra
-  path: ./flux/ack/build-cluster/infra
+  path: ./flux/ack/build-cluster
   prune: true
   deletionPolicy: WaitForTermination
   targetNamespace: ack-system
