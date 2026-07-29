@@ -1,0 +1,35 @@
+# Flux Pod Identity for build-cluster remote-apply (Stage 4 — Part D).
+#
+# Binds the control-plane Flux kustomize-controller service account to the
+# build-cluster IAM role (roles/flux-build-cluster-role.yaml) via standard Pod
+# Identity, so Flux can call eks:DescribeCluster and reach the build cluster's
+# API with workload identity (no static kubeconfig secret). Flux controllers are
+# distroless, so they cannot run an exec-plugin kubeconfig — the remote
+# Kustomization uses kubeConfig.configMapRef (provider: aws) backed by this
+# identity instead.
+#
+# NOTE: this association deliberately targets the CONTROL-PLANE cluster
+# (${STACK_NAME}-cluster), where Flux runs — not the build cluster. It uses a
+# literal clusterName (not clusterRef): the control-plane Cluster CR is an
+# adopt-or-create resource with a minimal spec (no roleARN/roleRef), so it never
+# reports ACK.ResourceSynced=True — and an ACK clusterRef refuses to resolve
+# against a not-synced target. A literal clusterName is just a string passed to
+# AWS, so it sidesteps that gate. This matches every other control-plane
+# PodIdentityAssociation (flux/ack/cluster/pod-identities/), which use
+# clusterName for the same reason. roleRef is fine — the role is in this tree
+# and syncs normally. It lives here in build-cluster/ because its sole reason to
+# exist is reaching the build cluster; everything enabling "Flux -> build
+# cluster" is grouped together for review.
+---
+apiVersion: eks.services.k8s.aws/v1alpha1
+kind: PodIdentityAssociation
+metadata:
+  name: flux-build-cluster-pod-identity
+  namespace: ack-system
+spec:
+  clusterName: ${STACK_NAME}-cluster
+  namespace: flux-system
+  serviceAccount: kustomize-controller
+  roleRef:
+    from:
+      name: flux-build-cluster-role

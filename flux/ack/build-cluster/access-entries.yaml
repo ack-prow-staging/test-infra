@@ -14,7 +14,16 @@
 # Phase 1 authenticates the four components (plank/sinker/crier/deck) as their
 # own pod identity — prow-deployment-role — with NO cross-account --role-arn.
 # Phase 2 will add an AccessEntry for the build account's cross-account access
-# role instead, and (if Flux remote-apply uses its own identity) a Flux entry.
+# role instead.
+#
+# The Flux entry (flux-build-cluster-access, below) lets the control-plane
+# kustomize-controller remote-apply the in-cluster objects (namespace / SA /
+# RBAC) that ACK cannot create. It carries the AmazonEKSClusterAdminPolicy
+# access policy rather than a kubernetesGroups mapping: cluster-side RBAC via the
+# AWS API is present on Flux's first reconcile, avoiding the bootstrap trap where
+# the RBAC authorizing Flux would itself be an object Flux must apply. This
+# matches Flux's existing privilege on the control-plane cluster, where
+# kustomize-controller is already bound to cluster-admin.
 ---
 # Dedicated build-cluster admin role (assumable by account root for break-glass)
 apiVersion: eks.services.k8s.aws/v1alpha1
@@ -92,3 +101,27 @@ spec:
   type: STANDARD
   kubernetesGroups:
   - prow-build-cluster
+---
+# Flux control-plane kustomize-controller identity — remote-applies the
+# in-cluster objects (test-pods namespace, pre-submit-service-account,
+# prow-build-cluster RBAC) that ACK cannot create. Granted cluster-admin via the
+# EKS access policy so its authorization is present on the first reconcile (see
+# header note on the bootstrap trap). Backed by flux-build-cluster-role +
+# flux-pod-identity.yaml.
+apiVersion: eks.services.k8s.aws/v1alpha1
+kind: AccessEntry
+metadata:
+  name: flux-build-cluster-access
+  namespace: ack-system
+  annotations:
+    services.k8s.aws/deletion-policy: retain
+spec:
+  clusterRef:
+    from:
+      name: build-cluster
+  principalARN: "arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-flux-build-cluster-role"
+  type: STANDARD
+  accessPolicies:
+  - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+    accessScope:
+      type: cluster

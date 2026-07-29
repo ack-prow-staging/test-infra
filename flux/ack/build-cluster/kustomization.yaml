@@ -13,10 +13,17 @@
 # cluster DNS built-in (per-node CoreDNS system service), so the coredns managed
 # addon is unnecessary. No Deck UI/ingress here either, so external-dns and the
 # ingress class are omitted as well.
+# roles/ holds the Flux build-cluster IAM role; flux-pod-identity.yaml binds it
+# to the control-plane kustomize-controller (Stage 4 — Part D). Like the other
+# day-2 CRs, the AccessEntry/PodIdentityAssociation referencing the role just
+# error-and-retry until ACK reconciles the role — no intra-kustomization
+# ordering needed.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
 - infra
+- roles
 - access-entries.yaml
 - pod-identities
+- flux-pod-identity.yaml
