@@ -35,6 +35,31 @@ spec:
       domain: "${PROW_DOMAIN}"
       presubmitsBucketName: "${STACK_NAME}-prow-logs-${ACCOUNT_ID}"
       tideStatusReconcilerBucketName: "${STACK_NAME}-prow-logs-${ACCOUNT_ID}"
+    # Build cluster (Stage 4 — Part D). Wires crier/deck/sinker/plank to the
+    # dedicated build cluster's API so pre-submit pods run there, isolated from
+    # the control plane. Gated on `enabled`; the four Deployments render
+    # unchanged while false (see prow-config.buildCluster* helpers in _helpers.tpl).
+    #
+    # Auth: the components authenticate as their own Pod Identity
+    # (prow-deployment-role) via the kubeconfig exec plugin (`aws-iam-authenticator
+    # token -i <clusterName>`) — the binary ships in the upstream base images, so
+    # no `-iam` wrapper image is needed. That identity is mapped to the
+    # `prow-build-cluster` group by the prow-deployment-build-access AccessEntry
+    # (flux/ack/build-cluster/access-entries.yaml), which the remote-applied RBAC
+    # (flux/prow/build-cluster-rbac) binds to pod permissions in test-pods.
+    #
+    # server + certificateAuthorityData come from the build cluster's ACK Cluster
+    # CR status, surfaced into the build-cluster-connection ConfigMap by
+    # flux/prow/build-cluster-connection and substituted here by Flux.
+    # Phase 2 (separate account) additionally sets accessRoleArn for the
+    # cross-account assume before token minting.
+    buildCluster:
+      enabled: true
+      name: build
+      clusterName: "${STACK_NAME}-build-cluster"
+      server: "${BUILD_CLUSTER_ENDPOINT}"
+      certificateAuthorityData: "${BUILD_CLUSTER_CA}"
+      accessRoleArn: ""
     crier:
       image: "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/prow/crier:${PROW_VERSION}"
       serviceAccount:
