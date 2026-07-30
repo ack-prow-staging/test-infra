@@ -1,0 +1,25 @@
+# Kubeconfig ConfigMap consumed by control-plane Flux to remote-apply to the
+# build cluster (Stage 4 — Part D). Applied LOCALLY to flux-system on the
+# control-plane cluster (where kustomize-controller runs and reads it), NOT to
+# the build cluster.
+#
+# Workload-identity form (provider: aws), not a static kubeconfig secret: Flux
+# controllers are distroless and cannot run an exec-plugin kubeconfig. With
+# serviceAccountName unset, Flux uses the CONTROLLER-level identity — the Pod
+# Identity bound to kustomize-controller (flux/ack/build-cluster/
+# flux-pod-identity.yaml → flux-build-cluster-role), which holds
+# eks:DescribeCluster. Flux calls DescribeCluster to fetch the endpoint + CA,
+# then authenticates via the flux-build-cluster-access AccessEntry (cluster-admin).
+#
+# `cluster` is the fully-qualified EKS cluster ARN; Flux's aws provider derives
+# the region from it. Requires Flux (kustomize-controller) >= v1.6 / Flux
+# distribution >= 2.7 for remote-cluster workload identity — this repo vendors
+# appVersion 2.8.8.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: build-cluster-flux-kubeconfig
+  namespace: flux-system
+data:
+  provider: aws
+  cluster: arn:aws:eks:${REGION}:${ACCOUNT_ID}:cluster/${STACK_NAME}-build-cluster

@@ -3,6 +3,14 @@
 # 2. prow-crds: CRDs must exist before anything else
 # 3. prow-mirror: Copies official Prow images from us-docker.pkg.dev into ECR
 # 4. prow-charts: Prow components that depend on images from step 3
+#
+# Build cluster (Stage 4 — Part D):
+# - prow-build-cluster-kubeconfig: applies the aws-provider kubeconfig ConfigMap
+#   LOCALLY (flux-system) so kustomize-controller can reach the build cluster.
+# - prow-build-cluster-rbac: REMOTE-applies namespace/SA/RBAC to the build
+#   cluster via kubeConfig.configMapRef (the only Kustomization here that targets
+#   a remote cluster). Depends on the ConfigMap + the ACK resources that grant
+#   Flux its identity/access (ack-build-infra).
 
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
@@ -78,3 +86,47 @@ spec:
       name: prow-version
   dependsOn:
   - name: prow-mirror
+---
+# Build cluster kubeconfig ConfigMap — applied LOCALLY to flux-system on the
+# control-plane cluster. Substitutes the cluster ARN into the aws-provider
+# kubeconfig kustomize-controller uses to reach the build cluster.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: prow-build-cluster-kubeconfig
+  namespace: flux-system
+spec:
+  interval: 60m
+  sourceRef:
+    kind: GitRepository
+    name: test-infra
+  path: ./flux/prow/build-cluster-kubeconfig
+  prune: true
+  postBuild:
+    substituteFrom:
+    - kind: ConfigMap
+      name: self-managed-vars
+---
+# Build cluster in-cluster objects (namespace / SA / RBAC) — REMOTE-applied to
+# the build cluster via kubeConfig.configMapRef (aws workload identity). This is
+# the only Kustomization here targeting a remote cluster. Depends on the local
+# kubeconfig ConfigMap and on ack-build-infra (which reconciles the Flux IAM
+# role, PodIdentityAssociation, and AccessEntry that authorize this reconcile).
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: prow-build-cluster-rbac
+  namespace: flux-system
+spec:
+  interval: 60m
+  sourceRef:
+    kind: GitRepository
+    name: test-infra
+  path: ./flux/prow/build-cluster-rbac
+  prune: true
+  kubeConfig:
+    configMapRef:
+      name: build-cluster-flux-kubeconfig
+  dependsOn:
+  - name: prow-build-cluster-kubeconfig
+  - name: ack-build-infra
