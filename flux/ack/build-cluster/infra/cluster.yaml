@@ -1,18 +1,11 @@
-# Build cluster — created by ACK EKS controller (all-ACK, no Terraform).
+# Build cluster — created (not adopted) by the ACK EKS controller running on the
+# control-plane cluster, against the AWS API in the same account.
+#   - roleRef     → the cluster IAM role CR (roles.yaml)
+#   - subnetRefs  → the private Subnet CRs (subnets.yaml); ACK resolves the IDs
+#                   once those reconcile, so no hardcoded IDs
 #
-# CREATE path (not adopt): the ACK EKS controller running on the control-plane
-# cluster provisions this cluster against the AWS API in the same account.
-#   - roleRef        → the cluster IAM role CR (roles.yaml)
-#   - subnetRefs     → the private Subnet CRs (subnets.yaml); ACK resolves the
-#                      subnet IDs once those reconcile, so no hardcoded IDs
-#   - nodeRoleARN    → literal ARN (EKS has no nodeRoleRef); safe because ACK
-#                      creates the role with the deterministic name
-#                      ${STACK_NAME}-build-node-role
-#
-# EKS Auto Mode is expressed by the trio: computeConfig.enabled +
-# kubernetesNetworkConfig.elasticLoadBalancing.enabled +
-# storageConfig.blockStorage.enabled. Mirrors the control-plane cluster
-# (bootstrap/cluster.tf) but self-managed by ACK end-to-end.
+# EKS Auto Mode is the trio computeConfig / elasticLoadBalancing / blockStorage
+# enabled, mirroring the control-plane cluster (bootstrap/cluster.tf).
 apiVersion: eks.services.k8s.aws/v1alpha1
 kind: Cluster
 metadata:
@@ -36,13 +29,22 @@ spec:
     endpointPrivateAccess: true
   accessConfig:
     authenticationMode: API
-    bootstrapClusterCreatorAdminPermissions: true
+    bootstrapClusterCreatorAdminPermissions: false
   bootstrapSelfManagedAddons: false
   computeConfig:
+    # Auto Mode enabled, but NO built-in NodePools. An empty nodePools list keeps
+    # EKS from provisioning the general-purpose/system pools (and their small
+    # instances that hit the ENI pod-density limit) — matching the control-plane
+    # cluster's end state (flux/ack/cluster/nodepool.yaml), which deletes
+    # general-purpose post-create via bootstrap/scripts/swap-nodepool.sh.
+    #
+    # Because no built-in pool is enabled, EKS does NOT auto-provision the managed
+    # `default` NodeClass or the node-role AccessEntry. Both are supplied by the
+    # remote-applied build-cluster-resources Kustomization: a custom NodeClass
+    # (prow-compute) + the prow-compute NodePool referencing it, plus an
+    # EC2-type node AccessEntry (flux/ack/build-cluster/access-entries.yaml).
     enabled: true
-    nodePools:
-    - general-purpose
-    nodeRoleARN: arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-build-node-role
+    nodePools: []
   kubernetesNetworkConfig:
     elasticLoadBalancing:
       enabled: true

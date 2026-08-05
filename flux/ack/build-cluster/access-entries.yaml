@@ -1,29 +1,14 @@
-# Build cluster EKS Access Entries managed by ACK (Phase 1: same-account).
+# Build cluster EKS Access Entries, reconciled by the control-plane ACK EKS
+# controller. They grant Kubernetes API access to the build cluster: a
+# break-glass admin role, the account's Admin/ReadOnly roles for humans, the
+# Prow components' role, the Flux kustomize-controller role, and the EC2 node
+# role (Auto Mode nodes — required because we run a custom NodeClass with no
+# built-in pools, so EKS doesn't auto-create the node entry).
 #
-# Reconciled against the AWS API by the control-plane ACK EKS controller.
-# These grant Kubernetes API access to the build cluster:
-#   - a dedicated break-glass admin role (${STACK_NAME}-build-cluster-admin-access-role)
-#   - the account's Admin / ReadOnly roles, for human access — mirrors the
-#     control-plane cluster (flux/ack/cluster/access-entries.yaml). Without the
-#     Admin entry, `aws eks update-kubeconfig` as role/Admin hits a 401, because
-#     bootstrapClusterCreatorAdminPermissions only admits the ACK creator role.
-#   - the Prow control-plane components' identity (prow-deployment-role), mapped
-#     to the `prow-build-cluster` group that the remote-applied data-plane RBAC
-#     binds (see flux/prow/charts/prow-data-plane-build.yaml, Part D).
-#
-# Phase 1 authenticates the four components (plank/sinker/crier/deck) as their
-# own pod identity — prow-deployment-role — with NO cross-account --role-arn.
-# Phase 2 will add an AccessEntry for the build account's cross-account access
-# role instead.
-#
-# The Flux entry (flux-build-cluster-access, below) lets the control-plane
-# kustomize-controller remote-apply the in-cluster objects (namespace / SA /
-# RBAC) that ACK cannot create. It carries the AmazonEKSClusterAdminPolicy
-# access policy rather than a kubernetesGroups mapping: cluster-side RBAC via the
-# AWS API is present on Flux's first reconcile, avoiding the bootstrap trap where
-# the RBAC authorizing Flux would itself be an object Flux must apply. This
-# matches Flux's existing privilege on the control-plane cluster, where
-# kustomize-controller is already bound to cluster-admin.
+# The Flux entry uses an access policy rather than a kubernetesGroups mapping so
+# its authorization exists on the first reconcile — otherwise the RBAC authorizing
+# Flux would itself be an object Flux must apply. Mirrors kustomize-controller on
+# the control plane.
 ---
 # Dedicated build-cluster admin role (assumable by account root for break-glass)
 apiVersion: eks.services.k8s.aws/v1alpha1
@@ -82,10 +67,9 @@ spec:
     accessScope:
       type: cluster
 ---
-# Prow control-plane components' identity — reaches the build cluster API to
-# schedule/clean/report on test pods. Mapped to the `prow-build-cluster` group;
-# the remote-applied data-plane RBAC (Part D) binds that group to the required
-# pod/prowjob permissions in the test-pods namespace.
+# Prow components' identity — reaches the build cluster API to schedule/clean/
+# report on test pods. Mapped to the `prow-build-cluster` group, which the
+# remote-applied RBAC (flux/prow/build-cluster-resources) binds in test-pods.
 apiVersion: eks.services.k8s.aws/v1alpha1
 kind: AccessEntry
 metadata:
@@ -102,12 +86,9 @@ spec:
   kubernetesGroups:
   - prow-build-cluster
 ---
-# Flux control-plane kustomize-controller identity — remote-applies the
-# in-cluster objects (test-pods namespace, pre-submit-service-account,
-# prow-build-cluster RBAC) that ACK cannot create. Granted cluster-admin via the
-# EKS access policy so its authorization is present on the first reconcile (see
-# header note on the bootstrap trap). Backed by flux-build-cluster-role +
-# flux-pod-identity.yaml.
+# Flux kustomize-controller identity — remote-applies the in-cluster objects
+# ACK cannot create. Cluster-admin via access policy (see header note). Backed
+# by flux-build-cluster-role + flux-pod-identity.yaml.
 apiVersion: eks.services.k8s.aws/v1alpha1
 kind: AccessEntry
 metadata:
@@ -123,5 +104,28 @@ spec:
   type: STANDARD
   accessPolicies:
   - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+    accessScope:
+      type: cluster
+---
+# Node role — lets EKS Auto Mode nodes join the cluster. EKS auto-creates this
+# entry only for built-in node pools; because the build cluster runs a custom
+# NodeClass with no built-in pools (infra/cluster.yaml computeConfig.nodePools:
+# []), we must create it. Type EC2 + AmazonEKSAutoNodePolicy is the required
+# combination for Auto Mode node roles (custom NodeClass docs: create-node-class).
+apiVersion: eks.services.k8s.aws/v1alpha1
+kind: AccessEntry
+metadata:
+  name: build-node-access
+  namespace: ack-system
+  annotations:
+    services.k8s.aws/deletion-policy: retain
+spec:
+  clusterRef:
+    from:
+      name: build-cluster
+  principalARN: "arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-build-node-role"
+  type: EC2
+  accessPolicies:
+  - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSAutoNodePolicy
     accessScope:
       type: cluster
