@@ -118,6 +118,10 @@ spec:
 # general-purpose (e.g. before the switch to nodePools: []) already has an
 # EKS-created EC2 entry for this same principal → ACK adopts it instead of
 # failing terminal on "resource already exists".
+#
+# No adoption-fields annotation needed: adopt-or-create reads the find/create
+# identifiers (principalARN + the clusterRef-resolved clusterName) from the spec.
+# adoption-fields is only required when a lookup field lives in status.
 apiVersion: eks.services.k8s.aws/v1alpha1
 kind: AccessEntry
 metadata:
@@ -126,7 +130,6 @@ metadata:
   annotations:
     services.k8s.aws/deletion-policy: retain
     services.k8s.aws/adoption-policy: adopt-or-create
-    services.k8s.aws/adoption-fields: '{"clusterName": "${STACK_NAME}-build-cluster", "principalARN": "arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-build-node-role"}'
 spec:
   clusterRef:
     from:
