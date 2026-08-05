@@ -110,8 +110,14 @@ spec:
 # Node role — lets EKS Auto Mode nodes join the cluster. EKS auto-creates this
 # entry only for built-in node pools; because the build cluster runs a custom
 # NodeClass with no built-in pools (infra/cluster.yaml computeConfig.nodePools:
-# []), we must create it. Type EC2 + AmazonEKSAutoNodePolicy is the required
+# []), we must supply it. Type EC2 + AmazonEKSAutoNodePolicy is the required
 # combination for Auto Mode node roles (custom NodeClass docs: create-node-class).
+#
+# adopt-or-create: a fresh Design-B cluster never ran a built-in pool, so EKS
+# never made this entry → ACK creates it. But a cluster that previously ran
+# general-purpose (e.g. before the switch to nodePools: []) already has an
+# EKS-created EC2 entry for this same principal → ACK adopts it instead of
+# failing terminal on "resource already exists".
 apiVersion: eks.services.k8s.aws/v1alpha1
 kind: AccessEntry
 metadata:
@@ -119,6 +125,8 @@ metadata:
   namespace: ack-system
   annotations:
     services.k8s.aws/deletion-policy: retain
+    services.k8s.aws/adoption-policy: adopt-or-create
+    services.k8s.aws/adoption-fields: '{"clusterName": "${STACK_NAME}-build-cluster", "principalARN": "arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-build-node-role"}'
 spec:
   clusterRef:
     from:
