@@ -1,3 +1,6 @@
+{{- $accountId := required "accountId is required" .Values.accountId }}
+{{- $region := required "region is required" .Values.region }}
+{{- $stackName := required "stackName is required" .Values.stackName }}
 # Kubeconfig ConfigMap consumed by control-plane Flux to remote-apply to the
 # build cluster. Applied LOCALLY to flux-system on the control-plane cluster, NOT
 # to the build cluster.
@@ -16,7 +19,6 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: build-cluster-flux-kubeconfig
-  namespace: flux-system
 data:
   provider: aws
-  cluster: arn:aws:eks:${REGION}:${ACCOUNT_ID}:cluster/${STACK_NAME}-build-cluster
+  cluster: arn:aws:eks:{{ $region }}:{{ $accountId }}:cluster/{{ $stackName }}-build-cluster
