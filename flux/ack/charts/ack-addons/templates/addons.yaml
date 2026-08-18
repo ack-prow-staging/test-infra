@@ -1,15 +1,20 @@
-# EKS Addons managed by ACK
+# EKS Addons managed by ACK.
+#
+# namespace is omitted throughout so the release namespace
+# (HelmRelease.spec.targetNamespace) places the objects. The chart owns no
+# Namespace.
+{{- $stackName := required "stackName is required" .Values.stackName }}
+{{- $accountId := required "accountId is required" .Values.accountId }}
 ---
 apiVersion: eks.services.k8s.aws/v1alpha1
 kind: Addon
 metadata:
   name: secrets-store-csi
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  clusterName: ${STACK_NAME}-cluster
+  clusterName: {{ $stackName }}-cluster
   name: aws-secrets-store-csi-driver-provider
   # Keep this at the newest version supported by THIS cluster's Kubernetes
   # version. The addon bundles the upstream secrets-store-csi-driver image, so an
@@ -36,25 +41,23 @@ apiVersion: eks.services.k8s.aws/v1alpha1
 kind: Addon
 metadata:
   name: external-dns-addon
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  clusterName: ${STACK_NAME}-cluster
+  clusterName: {{ $stackName }}-cluster
   name: external-dns
   podIdentityAssociations:
-  - roleARN: arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-external-dns-role
+  - roleARN: arn:aws:iam::{{ $accountId }}:role/{{ $stackName }}-external-dns-role
     serviceAccount: external-dns
 ---
 apiVersion: eks.services.k8s.aws/v1alpha1
 kind: Addon
 metadata:
   name: coredns
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  clusterName: ${STACK_NAME}-cluster
+  clusterName: {{ $stackName }}-cluster
   name: coredns
