@@ -1,3 +1,8 @@
+{{- $accountId := required "accountId is required" .Values.accountId }}
+{{- $prowPatchRevision := required "prowPatchRevision is required" .Values.prowPatchRevision }}
+{{- $prowVersion := required "prowVersion is required" .Values.prowVersion }}
+{{- $region := required "region is required" .Values.region }}
+{{- $toolsVersion := required "toolsVersion is required" .Values.toolsVersion }}
 # Mirrors official Prow images into a private ECR repository, applying
 # outstanding OS security updates on the way through.
 #
@@ -13,11 +18,11 @@
 # images have to be copied either way.
 #
 # Images come from two upstream registries:
-#   - us-docker.pkg.dev/k8s-infra-prow/images (Prow core, ${PROW_VERSION})
-#   - gcr.io/k8s-staging-test-infra (label_sync, commenter, ${TOOLS_VERSION})
+#   - us-docker.pkg.dev/k8s-infra-prow/images (Prow core, {{ $prowVersion }})
+#   - gcr.io/k8s-staging-test-infra (label_sync, commenter, {{ $toolsVersion }})
 #
 # Each patched image is published under two tags:
-#   <upstream-tag>-ack.${PROW_PATCH_REVISION}  authoritative; what prow-config
+#   <upstream-tag>-ack.{{ $prowPatchRevision }}  authoritative; what prow-config
 #                                              pins, so a revision bump is what
 #                                              triggers a Deployment rollout
 #   <upstream-tag>                             compatibility alias, same patched
@@ -58,7 +63,7 @@ spec:
         - -eu
         - -c
         - |
-          aws ecr get-login-password --region "$${AWS_REGION}" > /work/ecr-password
+          aws ecr get-login-password --region "${AWS_REGION}" > /work/ecr-password
 
           cat > /work/images.txt <<'EOF'
           PROW|crier
@@ -81,53 +86,53 @@ spec:
           : > /work/build-list
 
           while IFS='|' read -r class img; do
-            [ -z "$${class:-}" ] && continue
+            [ -z "${class:-}" ] && continue
 
-            case "$$class" in
+            case "$class" in
               PROW)
                 src="us-docker.pkg.dev/k8s-infra-prow/images"
-                tag="$${PROW_VERSION}"
+                tag="${PROW_VERSION}"
                 ;;
               TOOLS)
                 src="gcr.io/k8s-staging-test-infra"
-                tag="$${TOOLS_VERSION}"
+                tag="${TOOLS_VERSION}"
                 ;;
               *)
-                echo "unknown image class: $$class" >&2
+                echo "unknown image class: $class" >&2
                 exit 1
                 ;;
             esac
 
-            dst_tag="$${tag}$${PATCH_SUFFIX}"
+            dst_tag="${tag}${PATCH_SUFFIX}"
 
             if aws ecr describe-images \
-                 --region "$${AWS_REGION}" \
-                 --repository-name "prow/$${img}" \
-                 --image-ids "imageTag=$${dst_tag}" >/dev/null 2>&1; then
-              echo "  = prow/$${img}:$${dst_tag} already present"
+                 --region "${AWS_REGION}" \
+                 --repository-name "prow/${img}" \
+                 --image-ids "imageTag=${dst_tag}" >/dev/null 2>&1; then
+              echo "  = prow/${img}:${dst_tag} already present"
             else
-              echo "  + prow/$${img}:$${dst_tag} queued for build"
-              printf '%s|%s|%s|%s\n' "$$src" "$$img" "$$tag" "$$dst_tag" >> /work/build-list
+              echo "  + prow/${img}:${dst_tag} queued for build"
+              printf '%s|%s|%s|%s\n' "$src" "$img" "$tag" "$dst_tag" >> /work/build-list
             fi
           done < /work/images.txt
 
           echo ""
-          echo "Queued $$(wc -l < /work/build-list) image(s) for patching."
+          echo "Queued $(wc -l < /work/build-list) image(s) for patching."
         env:
         - name: AWS_REGION
-          value: "${REGION}"
+          value: "{{ $region }}"
         - name: PROW_VERSION
-          value: "${PROW_VERSION}"
+          value: "{{ $prowVersion }}"
         - name: TOOLS_VERSION
-          value: "${TOOLS_VERSION}"
+          value: "{{ $toolsVersion }}"
         # Pass the whole suffix, not the bare revision. `kustomize build` strips
-        # the redundant quotes from value: "${PROW_PATCH_REVISION}", and Flux
+        # the redundant quotes from value: "{{ $prowPatchRevision }}", and Flux
         # then substitutes a bare number, which YAML parses as an int -- the API
         # server rejects the Job because env[].value must be a string. Keeping a
         # non-numeric prefix in the value makes it a string under any quoting.
         # Must stay in sync with the tag suffix in flux/prow/charts/prow-config.yaml.
         - name: PATCH_SUFFIX
-          value: "-ack.${PROW_PATCH_REVISION}"
+          value: "-ack.{{ $prowPatchRevision }}"
         volumeMounts:
         - name: work
           mountPath: /work
@@ -149,31 +154,31 @@ spec:
             exit 0
           fi
 
-          buildah login -u AWS --password-stdin "$${ECR_REGISTRY}" < /work/ecr-password
+          buildah login -u AWS --password-stdin "${ECR_REGISTRY}" < /work/ecr-password
 
           # Pull the upstream image, apply pending apk updates, push under the
           # patched tag. Returns 2 for "cannot patch", which is not retryable.
           patch_one() {
-            __src="$$1"; __img="$$2"; __tag="$$3"; __dst_tag="$$4"
-            __dst="$${ECR_REGISTRY}/prow/$${__img}:$${__dst_tag}"
+            __src="$1"; __img="$2"; __tag="$3"; __dst_tag="$4"
+            __dst="${ECR_REGISTRY}/prow/${__img}:${__dst_tag}"
 
-            __ctr=$$(buildah from --pull=always "$${__src}/$${__img}:$${__tag}") || return 1
+            __ctr=$(buildah from --pull=always "${__src}/${__img}:${__tag}") || return 1
 
-            if ! buildah run --user root "$$__ctr" -- /bin/sh -c 'command -v apk >/dev/null 2>&1' < /dev/null; then
+            if ! buildah run --user root "$__ctr" -- /bin/sh -c 'command -v apk >/dev/null 2>&1' < /dev/null; then
               echo "     base image has no apk; refusing to publish unpatched" >&2
-              buildah rm "$$__ctr" >/dev/null 2>&1 || true
+              buildah rm "$__ctr" >/dev/null 2>&1 || true
               return 2
             fi
 
-            if ! buildah run --user root "$$__ctr" -- /bin/sh -c 'apk -U upgrade --no-cache' < /dev/null; then
-              buildah rm "$$__ctr" >/dev/null 2>&1 || true
+            if ! buildah run --user root "$__ctr" -- /bin/sh -c 'apk -U upgrade --no-cache' < /dev/null; then
+              buildah rm "$__ctr" >/dev/null 2>&1 || true
               return 1
             fi
 
-            buildah commit --rm "$$__ctr" "$$__dst" >/dev/null || return 1
+            buildah commit --rm "$__ctr" "$__dst" >/dev/null || return 1
 
-            if ! buildah push "$$__dst"; then
-              buildah rmi "$$__dst" >/dev/null 2>&1 || true
+            if ! buildah push "$__dst"; then
+              buildah rmi "$__dst" >/dev/null 2>&1 || true
               return 1
             fi
 
@@ -184,65 +189,65 @@ spec:
             # the bare tag too. Pointing it at patched content means a missed
             # reference degrades to "patched but unpinned" instead of
             # "silently unpatched".
-            __bare="$${ECR_REGISTRY}/prow/$${__img}:$${__tag}"
-            buildah tag "$$__dst" "$$__bare" >/dev/null 2>&1 || true
-            if ! buildah push "$$__bare"; then
-              echo "     warning: could not update bare tag $${__tag}" >&2
+            __bare="${ECR_REGISTRY}/prow/${__img}:${__tag}"
+            buildah tag "$__dst" "$__bare" >/dev/null 2>&1 || true
+            if ! buildah push "$__bare"; then
+              echo "     warning: could not update bare tag ${__tag}" >&2
             fi
 
-            buildah rmi "$$__dst" "$$__bare" >/dev/null 2>&1 || true
+            buildah rmi "$__dst" "$__bare" >/dev/null 2>&1 || true
             return 0
           }
 
           FAILED=0
           TOTAL=0
-          EXPECTED=$$(wc -l < /work/build-list | tr -d ' ')
+          EXPECTED=$(wc -l < /work/build-list | tr -d ' ')
 
           # Read the work list on FD 3, not stdin. buildah run attaches the
           # container's stdin, which drains an inherited stdin and silently ends
           # the loop after the first image.
           while IFS='|' read -r src img tag dst_tag <&3; do
-            [ -z "$${src:-}" ] && continue
-            TOTAL=$$((TOTAL + 1))
-            echo "-> $${img}:$${dst_tag} (from $${src}/$${img}:$${tag})"
+            [ -z "${src:-}" ] && continue
+            TOTAL=$((TOTAL + 1))
+            echo "-> ${img}:${dst_tag} (from ${src}/${img}:${tag})"
 
             attempt=1
             rc=1
-            while [ "$$attempt" -le 3 ]; do
-              patch_one "$$src" "$$img" "$$tag" "$$dst_tag"
-              rc=$$?
-              [ "$$rc" -eq 0 ] && break
+            while [ "$attempt" -le 3 ]; do
+              patch_one "$src" "$img" "$tag" "$dst_tag"
+              rc=$?
+              [ "$rc" -eq 0 ] && break
               # Unpatchable base image, retrying will not help.
-              [ "$$rc" -eq 2 ] && break
-              echo "   retry $$attempt/3"
-              attempt=$$((attempt + 1))
+              [ "$rc" -eq 2 ] && break
+              echo "   retry $attempt/3"
+              attempt=$((attempt + 1))
               sleep 10
             done
 
-            if [ "$$rc" -eq 0 ]; then
+            if [ "$rc" -eq 0 ]; then
               echo "   done"
             else
-              echo "   FAILED (rc=$$rc)"
-              FAILED=$$((FAILED + 1))
+              echo "   FAILED (rc=$rc)"
+              FAILED=$((FAILED + 1))
             fi
           done 3< /work/build-list
 
           echo ""
-          echo "Patch complete. Processed $${TOTAL}/$${EXPECTED}, failures: $${FAILED}"
+          echo "Patch complete. Processed ${TOTAL}/${EXPECTED}, failures: ${FAILED}"
 
           # Fail loudly if the loop did not cover the whole work list. Without
           # this the Job reports success after a partial run, and prow-charts
           # then rolls components onto tags that were never built.
-          if [ "$$TOTAL" -ne "$$EXPECTED" ]; then
-            echo "ERROR: processed $${TOTAL} of $${EXPECTED} queued images" >&2
+          if [ "$TOTAL" -ne "$EXPECTED" ]; then
+            echo "ERROR: processed ${TOTAL} of ${EXPECTED} queued images" >&2
             exit 1
           fi
 
-          [ "$$FAILED" -gt 0 ] && exit 1
+          [ "$FAILED" -gt 0 ] && exit 1
           exit 0
         env:
         - name: ECR_REGISTRY
-          value: "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
+          value: "{{ $accountId }}.dkr.ecr.{{ $region }}.amazonaws.com"
         - name: STORAGE_DRIVER
           value: vfs
         - name: BUILDAH_ISOLATION
