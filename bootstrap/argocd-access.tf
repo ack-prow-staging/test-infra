@@ -23,7 +23,7 @@
 # Nothing here touches the build cluster, deliberately. The build cluster is not
 # registered as an Argo CD spoke until Phase 4, and when it is, its AccessEntry
 # belongs in flux/ack/build-cluster/access-entries.yaml as an ACK CR alongside the
-# eight already there - not in Terraform. See the migration plan, D13.
+# eight already there - not in Terraform. See docs/argocd-migration.md, D13.
 ################################################################################
 
 locals {
@@ -122,7 +122,10 @@ resource "kubernetes_secret_v1" "argocd_cluster_hub" {
 # kubernetes_manifest validates against the live API at PLAN time, so the Argo CD
 # CRDs must already exist. That holds here because the capability created them. On a
 # fresh bootstrap the capability and this resource would be in the same apply, so the
-# capability must be applied first - see the note in the migration plan.
+# capability must be applied first:
+#   terraform apply -target=awscc_eks_capability.argocd
+# then a full apply. Only affects an empty account; on an existing stack the CRDs are
+# already present.
 ################################################################################
 
 resource "kubernetes_manifest" "argocd_project" {

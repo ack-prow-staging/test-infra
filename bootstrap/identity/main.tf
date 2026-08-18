@@ -11,9 +11,9 @@
 # aws_ssoadmin_instances and aws_identitystore_group data sources, not through a
 # cross-state reference.
 #
-# Teardown is explicit and only for account decommissioning - see the Teardown
-# section (T7) of docs/argocd-migration-plan.md. No prevent_destroy is set, because
-# that would make deliberate teardown impossible.
+# Teardown is explicit and only for account decommissioning - see the Teardown note in
+# docs/argocd-migration.md. No prevent_destroy is set, because that would make
+# deliberate teardown impossible.
 
 provider "aws" {
   region = var.region
