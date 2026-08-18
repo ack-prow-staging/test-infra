@@ -1,0 +1,153 @@
+# RBAC that lets Argo CD apply the Role and RoleBinding objects in the charts it
+# manages. Bound to the same kubernetesGroup on the capability role's EKS access entry
+# that cluster-scoped-rbac.yaml uses, which Terraform sets
+# (bootstrap/argocd-access.tf).
+#
+# WHY THIS IS NEEDED, and why it is not a privilege increase.
+#
+# Argo CD could not apply the seven RBAC objects in
+# flux/prow/charts/prow-build-cluster-connection. Every Role and RoleBinding was
+# refused:
+#
+#   roles.rbac.authorization.k8s.io "build-cluster-connection-write" is forbidden:
+#   user ".../ack-test-infra-staging-argocd-capability-role/aws-go-sdk-..."
+#   (groups=["argocd-cluster-scoped" "system:authenticated"]) is attempting to grant
+#   RBAC permissions not currently held:
+#   {APIGroups:[""], Resources:["configmaps"], Verbs:["get" "create" "update" "patch"]}
+#
+# Kubernetes escalation prevention: a principal may not create a Role granting
+# permissions it does not itself hold. The permissions named are ones Argo CD does
+# hold and has been exercising throughout this migration - configmaps write in
+# flux-system and prow through AmazonEKSAdminPolicy, and
+# eks.services.k8s.aws/clusters read through AmazonEKSACKPolicy.
+#
+# The mismatch is structural, not a misconfiguration. EKS access policies are enforced
+# by the EKS authorizer. Escalation prevention is implemented inside the RBAC
+# authorizer, and can only see in-cluster RBAC rules. A principal authorised entirely
+# by access policies therefore holds nothing as far as that check is concerned, and
+# cannot create a Role granting anything at all. This blocks any path containing RBAC
+# objects, not just this one.
+#
+# So these rules add no access Argo CD lacked. They restate a subset of what the
+# associated access policies already grant, in the form the RBAC authorizer can see,
+# so the escalation check passes.
+#
+# NAMESPACED, NOT CLUSTER-SCOPED, deliberately. Adding configmaps write to the
+# ClusterRole in cluster-scoped-rbac.yaml would grant it in every namespace, which is
+# broader than AmazonEKSAdminPolicy gives today - that association is scoped to
+# {ack-system, prow, test-pods, prometheus, flux-system}. Three Roles in the three
+# namespaces that actually need them keeps the grant equal to the existing one rather
+# than wider.
+#
+# Granting the `escalate` verb was the other option and is worse: it would let Argo CD
+# create a Role conferring anything at all, which is the opposite of scoping.
+#
+# Each rule here must remain a superset of what the corresponding chart Role grants. If
+# a chart's Role gains a verb or resource, the matching rule below needs it too or the
+# sync fails the same way. The three chart Roles are, as of this commit:
+#
+#   build-cluster-connection-read       ack-system   eks.services.k8s.aws/clusters get,list,watch
+#   build-cluster-connection-write      flux-system  configmaps get,create,update,patch
+#   build-cluster-connection-kubeconfig prow         configmaps get,create,update,patch
+#
+# Reconciled by Flux, like cluster-scoped-rbac.yaml, for the same reason: Argo CD
+# cannot apply the object that authorises Argo CD. Phase 5 has to decide who owns both.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-rbac-grantor
+  namespace: ack-system
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+rules:
+# Matches build-cluster-connection-read. The connection Job reads the build-cluster
+# Cluster CR status to discover the endpoint and CA.
+- apiGroups: ["eks.services.k8s.aws"]
+  resources: ["clusters"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-rbac-grantor
+  namespace: ack-system
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argocd-rbac-grantor
+subjects:
+# The group Terraform adds to the capability role's access entry. The entry's username
+# is session-templated and cannot serve as an RBAC subject, so a group is the only
+# stable option - see bootstrap/argocd-access.tf.
+- kind: Group
+  name: argocd-cluster-scoped
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-rbac-grantor
+  namespace: flux-system
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+rules:
+# Matches build-cluster-connection-write. The Job writes its intermediate ConfigMap
+# here. Not list/watch/delete: the chart Role does not grant them either.
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-rbac-grantor
+  namespace: flux-system
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argocd-rbac-grantor
+subjects:
+- kind: Group
+  name: argocd-cluster-scoped
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-rbac-grantor
+  namespace: prow
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+rules:
+# Matches build-cluster-connection-kubeconfig. The Job writes build-cluster-kubeconfig
+# here, which crier, deck, sinker and prow-controller-manager mount.
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-rbac-grantor
+  namespace: prow
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argocd-rbac-grantor
+subjects:
+- kind: Group
+  name: argocd-cluster-scoped
+  apiGroup: rbac.authorization.k8s.io
