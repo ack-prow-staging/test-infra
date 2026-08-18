@@ -1,3 +1,6 @@
+{{- $accountId := required "accountId is required" .Values.accountId }}
+{{- $region := required "region is required" .Values.region }}
+{{- $stackName := required "stackName is required" .Values.stackName }}
 # ACK Capability IAM Role - adopts the Terraform-created role.
 # Terraform creates the role with minimal bootstrap permissions; ACK adopts
 # it and reconciles the full set of inline policies going forward.
@@ -6,15 +9,14 @@ apiVersion: iam.services.k8s.aws/v1alpha1
 kind: Role
 metadata:
   name: ack-capability-role
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
     services.k8s.aws/adoption-policy: adopt-or-create
-    services.k8s.aws/adoption-fields: '{"name": "${STACK_NAME}-ack-capability-role"}'
+    services.k8s.aws/adoption-fields: '{"name": "{{ $stackName }}-ack-capability-role"}'
     services.k8s.aws/deletion-policy: retain
 spec:
-  name: ${STACK_NAME}-ack-capability-role
+  name: {{ $stackName }}-ack-capability-role
   assumeRolePolicyDocument: |
     {
       "Version": "2012-10-17",
@@ -37,11 +39,11 @@ spec:
             "Effect": "Allow",
             "Action": ["eks:*"],
             "Resource": [
-              "arn:aws:eks:${REGION}:${ACCOUNT_ID}:capability/${STACK_NAME}-*cluster/*",
-              "arn:aws:eks:${REGION}:${ACCOUNT_ID}:access-entry/${STACK_NAME}-*cluster/*",
-              "arn:aws:eks:${REGION}:${ACCOUNT_ID}:podidentityassociation/${STACK_NAME}-*cluster/*",
-              "arn:aws:eks:${REGION}:${ACCOUNT_ID}:addon/${STACK_NAME}-*cluster/*",
-              "arn:aws:eks:${REGION}:${ACCOUNT_ID}:cluster/${STACK_NAME}-*cluster"
+              "arn:aws:eks:{{ $region }}:{{ $accountId }}:capability/{{ $stackName }}-*cluster/*",
+              "arn:aws:eks:{{ $region }}:{{ $accountId }}:access-entry/{{ $stackName }}-*cluster/*",
+              "arn:aws:eks:{{ $region }}:{{ $accountId }}:podidentityassociation/{{ $stackName }}-*cluster/*",
+              "arn:aws:eks:{{ $region }}:{{ $accountId }}:addon/{{ $stackName }}-*cluster/*",
+              "arn:aws:eks:{{ $region }}:{{ $accountId }}:cluster/{{ $stackName }}-*cluster"
             ]
           }
         ]
@@ -102,8 +104,8 @@ spec:
             "Effect": "Allow",
             "Action": ["iam:*"],
             "Resource": [
-              "arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-*",
-              "arn:aws:iam::${ACCOUNT_ID}:role/Nova-DO-NOT-DELETE"
+              "arn:aws:iam::{{ $accountId }}:role/{{ $stackName }}-*",
+              "arn:aws:iam::{{ $accountId }}:role/Nova-DO-NOT-DELETE"
             ]
           }
         ]
@@ -116,9 +118,9 @@ spec:
             "Effect": "Allow",
             "Action": ["ecr:*"],
             "Resource": [
-              "arn:aws:ecr:${REGION}:${ACCOUNT_ID}:repository/fluxcd/*",
-              "arn:aws:ecr:${REGION}:${ACCOUNT_ID}:repository/kubernetes/*",
-              "arn:aws:ecr:${REGION}:${ACCOUNT_ID}:repository/prow/*"
+              "arn:aws:ecr:{{ $region }}:{{ $accountId }}:repository/fluxcd/*",
+              "arn:aws:ecr:{{ $region }}:{{ $accountId }}:repository/kubernetes/*",
+              "arn:aws:ecr:{{ $region }}:{{ $accountId }}:repository/prow/*"
             ]
           },
           {
@@ -134,7 +136,7 @@ spec:
           {
             "Effect": "Allow",
             "Action": ["secretsmanager:GetSecretValue"],
-            "Resource": "arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:ecr-pullthroughcache/*"
+            "Resource": "arn:aws:secretsmanager:{{ $region }}:{{ $accountId }}:secret:ecr-pullthroughcache/*"
           }
         ]
       }
@@ -146,8 +148,8 @@ spec:
             "Effect": "Allow",
             "Action": ["s3:*"],
             "Resource": [
-              "arn:aws:s3:::${STACK_NAME}-prow-logs-${ACCOUNT_ID}",
-              "arn:aws:s3:::${STACK_NAME}-prow-logs-${ACCOUNT_ID}/*"
+              "arn:aws:s3:::{{ $stackName }}-prow-logs-{{ $accountId }}",
+              "arn:aws:s3:::{{ $stackName }}-prow-logs-{{ $accountId }}/*"
             ]
           },
           {
