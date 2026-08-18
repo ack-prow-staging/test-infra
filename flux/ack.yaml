@@ -102,7 +102,40 @@ spec:
       name: self-managed-vars
   dependsOn:
   - name: ack-capability
-  wait: true
+  # wait: true is deliberately NOT used here, because it would health-check every
+  # object in the path including the Cluster CR — and this Kustomization must not be
+  # gated on that CR's Ready condition.
+  #
+  # The hub cluster is created by Terraform, which holds ignore_changes on it; the CR
+  # exists to adopt it, not to manage it. ACK nonetheless keeps issuing an UpdateCluster
+  # call for it and EKS keeps rejecting it, so the CR settles at
+  # ACK.ResourceSynced: True with Ready: False. Under wait: true that left ack-cluster
+  # permanently Progressing and all twelve Kustomizations behind it
+  # DependencyNotReady — the whole tree blocked on ACK's opinion of a cluster that is
+  # ACTIVE and serving traffic.
+  #
+  # So gate on the objects whose readiness dependents actually rely on: the access
+  # entries that grant cluster access, and the node pools that provide capacity.
+  wait: false
+  healthChecks:
+  - apiVersion: eks.services.k8s.aws/v1alpha1
+    kind: AccessEntry
+    name: admin-access
+    namespace: ack-system
+  - apiVersion: eks.services.k8s.aws/v1alpha1
+    kind: AccessEntry
+    name: cluster-admin-access
+    namespace: ack-system
+  - apiVersion: eks.services.k8s.aws/v1alpha1
+    kind: AccessEntry
+    name: readonly-access
+    namespace: ack-system
+  - apiVersion: karpenter.sh/v1
+    kind: NodePool
+    name: prow-compute
+  - apiVersion: karpenter.sh/v1
+    kind: NodePool
+    name: prow-control-plane
 
 # --- Addons (depends on cluster + addon roles) ---
 ---
