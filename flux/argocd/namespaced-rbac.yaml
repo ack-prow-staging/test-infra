@@ -49,6 +49,7 @@
 #   build-cluster-connection-read       ack-system   eks.services.k8s.aws/clusters get,list,watch
 #   build-cluster-connection-write      flux-system  configmaps get,create,update,patch
 #   build-cluster-connection-kubeconfig prow         configmaps get,create,update,patch
+#   build-cluster-connection-registrar  argocd       secrets    get,create,update,patch
 #
 # Reconciled by Flux, like cluster-scoped-rbac.yaml, for the same reason: Argo CD
 # cannot apply the object that authorises Argo CD. Phase 5 has to decide who owns both.
@@ -140,6 +141,46 @@ kind: RoleBinding
 metadata:
   name: argocd-rbac-grantor
   namespace: prow
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argocd-rbac-grantor
+subjects:
+- kind: Group
+  name: argocd-cluster-scoped
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-rbac-grantor
+  namespace: argocd
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+rules:
+# Matches build-cluster-connection-registrar. The connection Job registers the build
+# cluster as an Argo CD spoke by writing a labelled cluster Secret here - which must
+# happen at runtime, since the build cluster is an ACK Cluster CR and Terraform must not
+# own a registration keyed to it (D13).
+#
+# This namespace is the one gap the associated access policies leave. AmazonEKSAdminPolicy
+# is scoped to {ack-system, prow, test-pods, prometheus, flux-system} and does not include
+# argocd; AmazonEKSArgoCDPolicy covers argocd but is the capability's own-operation grant,
+# which reads cluster Secrets rather than creating Roles that write them. So without this
+# rule Argo CD cannot apply the chart's Role and the registration never happens.
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-rbac-grantor
+  namespace: argocd
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
