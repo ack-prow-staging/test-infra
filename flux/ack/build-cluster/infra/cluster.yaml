@@ -13,6 +13,7 @@ metadata:
   namespace: ack-system
   annotations:
     services.k8s.aws/deletion-policy: retain
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: ${STACK_NAME}-build-cluster
   version: "1.35"

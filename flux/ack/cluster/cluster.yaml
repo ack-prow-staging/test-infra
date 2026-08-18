@@ -11,6 +11,14 @@ metadata:
     services.k8s.aws/deletion-policy: retain
 spec:
   name: ${STACK_NAME}-cluster
+  # Required even though this CR only ever adopts an existing cluster. ACK resolves
+  # references BEFORE it evaluates the adoption policy, so without roleARN the CR is
+  # rejected with "resource reference wrapper or ID required: RoleARN,RoleRef" and
+  # never adopts. That is invisible while the CR is long-lived, and fatal the moment it
+  # is recreated - which is exactly what happens when this path is converted to a Helm
+  # chart, or when a prune deletes and re-applies it. The role itself is created by
+  # Terraform (bootstrap/cluster.tf), so this references it by name rather than by CR.
+  roleARN: "arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-cluster-role"
   version: "1.35"
   resourcesVPCConfig:
     endpointPublicAccess: true

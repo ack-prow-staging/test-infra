@@ -1,6 +1,14 @@
 # Private ECR repositories for mirrored Prow images.
 # Populated by the prow-mirror Job which copies images from upstream registries.
 # force-delete: "true" ensures ACK can delete repos even when they contain images.
+#
+# adoption-policy: adopt-or-create lets a recreated CR adopt the existing
+# repository instead of failing with "already exists". Note the deliberate
+# asymmetry: there is no deletion-policy: retain here, because force-delete is
+# meant to let teardown remove non-empty repos. That means deleting one of these
+# CRs destroys the repository AND every image in it, so these CRs must never be
+# pruned during a migration - keep the owning Kustomization prune: false while
+# its inventory changes shape.
 ---
 apiVersion: ecr.services.k8s.aws/v1alpha1
 kind: Repository
@@ -8,6 +16,7 @@ metadata:
   name: prow-crier
   annotations:
     ecr.services.k8s.aws/force-delete: "true"
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: prow/crier
   imageTagMutability: MUTABLE
@@ -20,6 +29,7 @@ metadata:
   name: prow-deck
   annotations:
     ecr.services.k8s.aws/force-delete: "true"
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: prow/deck
   imageTagMutability: MUTABLE
@@ -32,6 +42,7 @@ metadata:
   name: prow-ghproxy
   annotations:
     ecr.services.k8s.aws/force-delete: "true"
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: prow/ghproxy
   imageTagMutability: MUTABLE
@@ -44,6 +55,7 @@ metadata:
   name: prow-hook
   annotations:
     ecr.services.k8s.aws/force-delete: "true"
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: prow/hook
   imageTagMutability: MUTABLE
@@ -56,6 +68,7 @@ metadata:
   name: prow-horologium
   annotations:
     ecr.services.k8s.aws/force-delete: "true"
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: prow/horologium
   imageTagMutability: MUTABLE
@@ -68,6 +81,7 @@ metadata:
   name: prow-controller-manager
   annotations:
     ecr.services.k8s.aws/force-delete: "true"
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: prow/prow-controller-manager
   imageTagMutability: MUTABLE
@@ -80,6 +94,7 @@ metadata:
   name: prow-sinker
   annotations:
     ecr.services.k8s.aws/force-delete: "true"
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: prow/sinker
   imageTagMutability: MUTABLE
@@ -92,6 +107,7 @@ metadata:
   name: prow-status-reconciler
   annotations:
     ecr.services.k8s.aws/force-delete: "true"
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: prow/status-reconciler
   imageTagMutability: MUTABLE
@@ -104,6 +120,7 @@ metadata:
   name: prow-tide
   annotations:
     ecr.services.k8s.aws/force-delete: "true"
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: prow/tide
   imageTagMutability: MUTABLE
@@ -116,6 +133,7 @@ metadata:
   name: prow-clonerefs
   annotations:
     ecr.services.k8s.aws/force-delete: "true"
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: prow/clonerefs
   imageTagMutability: MUTABLE
@@ -128,6 +146,7 @@ metadata:
   name: prow-entrypoint
   annotations:
     ecr.services.k8s.aws/force-delete: "true"
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: prow/entrypoint
   imageTagMutability: MUTABLE
@@ -140,6 +159,7 @@ metadata:
   name: prow-initupload
   annotations:
     ecr.services.k8s.aws/force-delete: "true"
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: prow/initupload
   imageTagMutability: MUTABLE
@@ -152,6 +172,7 @@ metadata:
   name: prow-sidecar
   annotations:
     ecr.services.k8s.aws/force-delete: "true"
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: prow/sidecar
   imageTagMutability: MUTABLE
@@ -164,6 +185,7 @@ metadata:
   name: prow-label-sync
   annotations:
     ecr.services.k8s.aws/force-delete: "true"
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: prow/label_sync
   imageTagMutability: MUTABLE
@@ -176,6 +198,7 @@ metadata:
   name: prow-commenter
   annotations:
     ecr.services.k8s.aws/force-delete: "true"
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   name: prow/commenter
   imageTagMutability: MUTABLE

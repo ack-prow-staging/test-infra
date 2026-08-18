@@ -15,6 +15,12 @@ kind: PodIdentityAssociation
 metadata:
   name: prow-build-presubmit-pod-identity
   namespace: ack-system
+  annotations:
+    # Without this, a recreated CR fails with "ResourceInUseException: Association
+    # already exists" and never reaches Ready, which blocks ack-build-infra's health
+    # check and every Kustomization behind it. The find identifiers (clusterRef,
+    # namespace, serviceAccount) are all in spec, so adoption-fields is not needed.
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   clusterRef:
     from:

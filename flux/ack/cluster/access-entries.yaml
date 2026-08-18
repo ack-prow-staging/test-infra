@@ -9,6 +9,7 @@ metadata:
   namespace: ack-system
   annotations:
     services.k8s.aws/deletion-policy: retain
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   clusterName: ${STACK_NAME}-cluster
   principalARN: "arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-cluster-admin-access-role"
@@ -45,6 +46,7 @@ metadata:
   namespace: ack-system
   annotations:
     services.k8s.aws/deletion-policy: retain
+    services.k8s.aws/adoption-policy: adopt-or-create
 spec:
   clusterName: ${STACK_NAME}-cluster
   principalARN: "arn:aws:iam::${ACCOUNT_ID}:role/ReadOnly"
