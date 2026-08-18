@@ -4,7 +4,6 @@ apiVersion: iam.services.k8s.aws/v1alpha1
 kind: Role
 metadata:
   name: supernova-role
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep

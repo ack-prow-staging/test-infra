@@ -1,16 +1,17 @@
 # S3 Bucket for Prow job logs
+{{- $accountId := required "accountId is required" .Values.accountId }}
+{{- $stackName := required "stackName is required" .Values.stackName }}
 ---
 apiVersion: s3.services.k8s.aws/v1alpha1
 kind: Bucket
 metadata:
   name: prow-logs
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
     services.k8s.aws/deletion-policy: retain
 spec:
-  name: ${STACK_NAME}-prow-logs-${ACCOUNT_ID}
+  name: {{ $stackName }}-prow-logs-{{ $accountId }}
   encryption:
     rules:
     - applyServerSideEncryptionByDefault:
