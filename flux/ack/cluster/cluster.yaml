@@ -29,7 +29,7 @@ spec:
     # Public Endpoint Restrictions: [0.0.0.0/0]". That leaves the CR Ready=False
     # forever, and because Flux health checks read the Ready condition, ack-cluster
     # never reconciles and every Kustomization behind it stays DependencyNotReady.
-    publicAccessCidrs:
+    publicAccessCIDRs:
     - "0.0.0.0/0"
   accessConfig:
     authenticationMode: API
