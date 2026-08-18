@@ -10,6 +10,28 @@ metadata:
   name: prow-mirror
   namespace: flux-system
 spec:
+  # NOT cut over, and it should not be an Argo CD Application at all.
+  #
+  # This path's only object is the mirror Job, which is a Helm post-install/post-upgrade
+  # hook. Argo CD classifies hooks with status None and does not include them in the
+  # comparison, so the Application has ZERO tracked resources. It is therefore
+  # permanently and trivially Synced - there is nothing that can ever differ - which
+  # means no drift, no sync, and no hook run. Enabling syncPolicy.automated does not
+  # help: automated fires on drift, and drift is impossible here.
+  #
+  # So this is not a permissions problem or a syncStrategy problem. An Application whose
+  # only object is a hook has no trigger, by construction.
+  #
+  # That matches the original decision (D3), which had prow-mirror leaving the sync path
+  # entirely to become a Prow periodic. Converting it to a Helm hook chart moved it the
+  # wrong way. The fix is to make the mirror a scheduled job Prow owns, then delete this
+  # path and its Application - not to migrate it.
+  #
+  # Flux keeps running it meanwhile: helm-controller executes the hook on every upgrade.
+  #
+  # prow-build-cluster-connection is NOT the same case, despite also being hook-driven:
+  # it has seven tracked RBAC objects, so syncs do happen there and the hook question is
+  # still open for it.
   interval: 60m
   targetNamespace: test-pods
   chart:

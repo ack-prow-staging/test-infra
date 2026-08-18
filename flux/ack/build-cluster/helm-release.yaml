@@ -15,6 +15,30 @@ metadata:
   name: ack-build-infra
   namespace: flux-system
 spec:
+  # SUSPENDED: this path is cut over to Argo CD (Application ack-build-infra, in
+  # bootstrap/argocd-applications.tf). helm-controller stops reconciling, so the
+  # objects are managed solely by Argo CD, while the enclosing Kustomization stays
+  # active and keeps enforcing this field.
+  #
+  # It has to be declared here rather than applied with kubectl. The root test-infra
+  # Kustomization re-applies these specs, so an imperative suspend is silently
+  # reverted on the next reconcile and both reconcilers end up managing the same
+  # objects. Suspending the Kustomization instead does not work either: the
+  # HelmRelease is applied BY that Kustomization, so a suspended one can never
+  # deliver a suspend to its own HelmRelease.
+  #
+  # Highest-consequence path on the stack. It fronts the build cluster and its whole
+  # network: vpc-043d9e465a952d550, four subnets, nat-035bad42404b99cd7, an EIP, an
+  # IGW and two route tables. None of those fail loudly if a CR is recreated -
+  # CreateVpc, CreateSubnet, CreateNatGateway and AllocateAddress all duplicate
+  # happily - so verification is by AWS resource COUNT as well as by id, since a
+  # duplicate is the failure mode rather than an error.
+  #
+  # It also carries the three objects that give Flux its own remote access to the
+  # build cluster: flux-build-cluster-role, flux-build-cluster-access and
+  # flux-build-cluster-pod-identity. prow-build-cluster-resources remote-applies
+  # through them and must still be Ready after the cutover.
+  suspend: true
   interval: 60m
   targetNamespace: ack-system
   chart:

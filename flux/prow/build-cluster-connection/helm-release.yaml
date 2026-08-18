@@ -13,6 +13,35 @@ metadata:
   name: prow-build-cluster-connection
   namespace: flux-system
 spec:
+  # NOT cut over. The RBAC blocker is solved; the Job's trigger is the problem, and it is
+  # the same problem prow-mirror has.
+  #
+  # Settled: flux/argocd/namespaced-rbac.yaml lets Argo CD apply all six Role and
+  # RoleBinding objects, and all seven objects sync keeping their uid. That part works and
+  # the file must stay.
+  #
+  # Also settled, after testing every available lever: Argo CD runs hooks only as part of
+  # a sync operation, and it only syncs on drift or an explicit trigger. The Job is a hook,
+  # so Argo CD gives it status None and excludes it from the comparison - deleting the Job
+  # is therefore not drift, and syncPolicy.automated never fires. Verified: with the path
+  # suspended, automated enabled and the Job deleted, the Application sat at Synced
+  # indefinitely and the Job was never recreated.
+  #
+  # That is a weaker trigger than Flux gives it. helm-controller runs the hook on every
+  # upgrade, so the Job re-reads the Cluster CR status and rewrites
+  # build-cluster-kubeconfig on each release. Under Argo CD nothing re-runs it unless a
+  # tracked manifest changes - and the event that should re-run it, the build cluster being
+  # replaced, changes no manifest at all. The ConfigMap would stay frozen at a stale
+  # endpoint and CA, and the four Prow components mounting it would fail later for a
+  # reason disconnected from any change.
+  #
+  # So both one-shot Job paths need the same fix, which is the original decision (D3)
+  # applied to both: take the Job out of the sync path and give it a schedule Prow owns.
+  # A hook is the wrong primitive for work that must follow a runtime input rather than a
+  # manifest change. Once that is done this path keeps its seven RBAC objects on Argo CD
+  # and loses the Job, and prow-mirror disappears entirely.
+  #
+  # Flux keeps this path until then, and runs the hook on every upgrade.
   interval: 60m
   targetNamespace: flux-system
   chart:

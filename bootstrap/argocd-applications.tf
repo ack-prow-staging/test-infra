@@ -34,6 +34,22 @@
 # image: ${PROW_IMAGES_REPO_URI}:... into a Deployment and GITHUB_ORG:
 # ${TEST_INFRA_ORG} into the agent workflow config. They stay on Flux until their
 # per-environment kustomize overlays exist.
+#
+# prow-build-cluster-kubeconfig is absent for a different reason: it does not outlive
+# Flux, so there is nothing to migrate. The build-cluster-flux-kubeconfig ConfigMap
+# exists only so kustomize-controller can remote-apply into the build cluster, its one
+# consumer is that Kustomization's kubeConfig.configMapRef, and Phase 5 deletes
+# flux/prow/build-cluster-kubeconfig/ outright - the Access Entry replaces it. Moving
+# it to Argo CD first would mean adopting an object in order to delete it.
+#
+# Note the contrast with flux/prow/build-cluster-connection/, which looks similar and
+# is NOT deleted: it writes the build-cluster-kubeconfig that Prow's own components
+# mount, so it survives the migration and does have an Application (D16).
+#
+# ack-flux is in the same category and is already cut over, done before this was
+# noticed. Its PullThroughCacheRule caches ghcr.io/fluxcd images for Flux and Phase 5
+# removes it with the rest. Left as-is rather than reverted - it is working and
+# un-migrating it would be churn - but it does not need to reach automated sync.
 ################################################################################
 
 locals {
@@ -103,15 +119,11 @@ locals {
       target_namespace = "ack-system"
       values           = ["accountId", "region", "stackName"]
     }
-    prow-build-cluster-kubeconfig = {
-      # flux-system, not ack-system: kustomize-controller reads this ConfigMap via
-      # kubeConfig.configMapRef, so it must sit where the controller looks. Phase 5
-      # removes it along with Flux.
-      path             = "flux/prow/charts/prow-build-cluster-kubeconfig"
-      target_namespace = "flux-system"
-      values           = ["accountId", "region", "stackName"]
-    }
     prow-build-cluster-connection = {
+      # flux-system, not ack-system: the Job writes build-cluster-kubeconfig there and
+      # Prow's crier, deck, sinker and prow-controller-manager mount it from there.
+      # Unlike prow-build-cluster-kubeconfig this path survives Flux (D16), which is
+      # why it has an Application and that one does not.
       path             = "flux/prow/charts/prow-build-cluster-connection"
       target_namespace = "flux-system"
       values           = ["prowImagesRepoUri", "stackName"]
@@ -174,6 +186,25 @@ resource "kubernetes_manifest" "argocd_application" {
           "CreateNamespace=false",
         ]
       }
+
+      # NO ignoreDifferences, deliberately. ACK late-initialises fields the charts never
+      # set - addonVersion and encryptionConfiguration and registryID, maxSessionDuration
+      # and path on every Role, disableSessionTags on every association - and a plain
+      # spec comparison flags all of them. They are NOT drift to Argo CD.
+      #
+      # ServerSideApply is why: Argo CD diffs only the fields it manages, so fields owned
+      # by another field manager (`eks`, the ACK controller) are not part of the
+      # comparison. Confirmed by experiment rather than by reading: exceptions for
+      # addonVersion and disableSessionTags were added, then removed from the live
+      # Applications and the paths hard-refreshed - both stayed Synced with
+      # ignoreDifferences: []. ack-addons-roles and ack-pod-identity-roles have always
+      # been Synced with no exception despite their Roles carrying late-initialised
+      # maxSessionDuration and path.
+      #
+      # So do not add an exception because `helm template` differs from live. Cut the path
+      # over and let Argo CD report; add one only for a field Argo CD itself calls
+      # OutOfSync. RespectIgnoreDifferences=true was removed with the exceptions since it
+      # does nothing without them.
     }
   }
 
