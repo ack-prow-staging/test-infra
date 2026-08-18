@@ -1,0 +1,68 @@
+# RBAC granting the Argo CD capability write access to the cluster-scoped objects it
+# manages. Bound to the kubernetesGroup on the capability role's EKS access entry,
+# which Terraform sets (bootstrap/argocd-access.tf).
+#
+# WHY THIS EXISTS, since the obvious answers all fail:
+#
+#   No associable EKS access policy covers these objects.
+#   AmazonEKSBlockStorageClusterPolicy and AmazonEKSComputeClusterPolicy are rejected
+#   outright - "The specified policyArn can only be associated with service-linked
+#   roles". AmazonEKSLoadBalancingClusterPolicy associates but grants no IngressClass
+#   write. AmazonEKSAdminPolicy mirrors the built-in admin ClusterRole, which is
+#   namespace-oriented and excludes cluster-scoped resources and CRD instances; it
+#   makes no difference at either scope, and associating it at cluster scope silently
+#   REPLACES a namespace-scoped association of the same policy, widening that grant.
+#
+#   The only associable policy that would cover all of these is
+#   AmazonEKSClusterAdminPolicy, i.e. cluster-admin for Argo CD.
+#
+# So the capability role's access entry carries a kubernetesGroup and this ClusterRole
+# grants exactly the four API groups the ack-cluster chart needs. The entry's username
+# is session-templated (".../{{SessionName}}") and unusable as an RBAC subject, but a
+# group works. An earlier decision record claimed in-cluster RBAC was impossible here
+# because the auto-created entry had no group - it does not, but a group can be added.
+#
+# If the ack-cluster chart stops carrying cluster-scoped objects, this should go too.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argocd-cluster-scoped
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+rules:
+# StorageClass - auto-ebs-sc
+- apiGroups: ["storage.k8s.io"]
+  resources: ["storageclasses"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# IngressClass - alb
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingressclasses"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Karpenter NodePool - prow-compute and prow-control-plane on the hub, and the build
+# cluster's pool once that cluster is registered as a spoke
+- apiGroups: ["karpenter.sh"]
+  resources: ["nodepools"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# EKS Auto Mode NodeClass - the build cluster's custom prow-compute class. Required
+# because the build cluster enables Auto Mode with no built-in NodePools, so no
+# managed `default` NodeClass exists.
+- apiGroups: ["eks.amazonaws.com"]
+  resources: ["nodeclasses"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argocd-cluster-scoped
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argocd-cluster-scoped
+subjects:
+- kind: Group
+  name: argocd-cluster-scoped
+  apiGroup: rbac.authorization.k8s.io

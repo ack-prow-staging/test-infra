@@ -219,3 +219,109 @@ resource "aws_eks_access_policy_association" "argocd_hub_crd" {
     type = "cluster"
   }
 }
+
+################################################################################
+# ACK custom resources.
+#
+# Found by cutting one path over and watching it fail safely:
+#
+#   pullthroughcacherules.ecr.services.k8s.aws "ghcr-fluxcd" is forbidden: User
+#   ".../ack-test-infra-staging-argocd-capability-role/aws-go-sdk-..." cannot patch
+#   resource "pullthroughcacherules" in API group "ecr.services.k8s.aws" in the
+#   namespace "ack-system"
+#
+# AmazonEKSAdminPolicy is already associated for the workload namespaces, but the
+# AWS-managed policies enumerate standard API groups and do not extend to arbitrary
+# CRDs. Argo CD manages 63 ACK custom resources across the *.services.k8s.aws
+# groups, so without this it can render them but never apply them.
+#
+# As established in D14, in-cluster RBAC is not an option: the capability's access
+# entry carries no kubernetesGroups and a session-templated username, so there is no
+# stable subject to bind. Associated access policies are the only lever.
+#
+# AmazonEKSACKPolicy is exactly the right shape - it is what the ACK capability role
+# itself is granted, and it is scoped to the *.services.k8s.aws groups rather than
+# handing out cluster-admin.
+#
+# Cluster scope, matching the ACK capability role's own association: ACK CRs live in
+# ack-system today, but the scope of a policy granting only ACK API groups is already
+# narrow, and namespace scope would silently break if a controller is ever pointed at
+# another namespace.
+################################################################################
+resource "aws_eks_access_policy_association" "argocd_hub_ack" {
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = local.argocd_capability_role_arn
+  policy_arn    = "arn:${local.partition}:eks::aws:cluster-access-policy/AmazonEKSACKPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+}
+
+################################################################################
+# Cluster-scoped objects in the ack-cluster chart.
+#
+# Found by cutting one path over and reading the per-resource result. The three
+# namespaced ACK CRs synced; all four cluster-scoped objects were refused:
+#
+#   StorageClass  auto-ebs-sc         SyncFailed  cannot patch StorageClass
+#   IngressClass  alb                 SyncFailed  cannot patch IngressClass
+#   NodePool      prow-compute        SyncFailed  cannot patch NodePool
+#   NodePool      prow-control-plane  SyncFailed  cannot patch NodePool
+#
+# NO ACCESS POLICY SOLVES THIS. Recorded so the next attempt does not repeat it:
+#
+#   AmazonEKSBlockStorageClusterPolicy and AmazonEKSComputeClusterPolicy cannot be
+#   associated at all - "InvalidParameterException: The specified policyArn can only
+#   be associated with service-linked roles". They are reserved for EKS Auto Mode's
+#   own service-linked roles. Declaring either as a resource here makes every apply
+#   fail, which is why neither appears below.
+#
+#   AmazonEKSLoadBalancingClusterPolicy associates but grants no IngressClass write.
+#   AmazonEKSAdminPolicy grants nothing extra at either scope: it mirrors the built-in
+#   admin ClusterRole, which is namespace-oriented and excludes cluster-scoped
+#   resources and CRD instances. It also covers no CRD group, so it misses
+#   karpenter.sh regardless. Associating it at CLUSTER scope REPLACES the
+#   namespace-scoped association above of the same policy, silently widening that
+#   grant - verify with list-associated-access-policies after any change.
+#
+#   The only associable policy covering all four is AmazonEKSClusterAdminPolicy, i.e.
+#   cluster-admin for Argo CD.
+#
+# Solved instead by adding a Kubernetes group to the capability role's access entry
+# and binding a narrow ClusterRole to it - see the access entry at the end of this
+# file and flux/argocd/cluster-scoped-rbac.yaml.
+################################################################################
+
+################################################################################
+# A Kubernetes group on the capability role's access entry.
+#
+# This is the lever that avoids granting Argo CD cluster-admin. An earlier decision
+# record concluded in-cluster RBAC was impossible here, because the capability's
+# auto-created access entry ships with kubernetesGroups: [] and a session-templated
+# username that cannot serve as an RBAC subject. The first half is true; the
+# conclusion was not. A group can be ADDED to the entry, and a group is bindable.
+#
+# With this set, flux/argocd/cluster-scoped-rbac.yaml binds a ClusterRole granting
+# exactly storage.k8s.io/storageclasses, networking.k8s.io/ingressclasses,
+# karpenter.sh/nodepools and eks.amazonaws.com/nodeclasses - the cluster-scoped
+# objects in the ack-cluster chart. Verified: all four sync, and adding the group
+# leaves the six associated access policies intact.
+#
+# Kept as a separate resource rather than folded into an access entry declaration,
+# because the entry itself is created by the capability, not by Terraform. Terraform
+# only adds the group to it.
+################################################################################
+resource "aws_eks_access_entry" "argocd_capability_group" {
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = local.argocd_capability_role_arn
+
+  # Must match the subject in flux/argocd/cluster-scoped-rbac.yaml.
+  kubernetes_groups = ["argocd-cluster-scoped"]
+
+  lifecycle {
+    # The capability owns the entry and sets type and username; Terraform contributes
+    # only the group. Without this, Terraform and the capability fight over the rest.
+    ignore_changes = [type, user_name]
+  }
+}
