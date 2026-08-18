@@ -1,19 +1,20 @@
 # EKS Access Entries managed by ACK.
 # These define who can access the cluster and with what permissions.
+{{- $accountId := required "accountId is required" .Values.accountId }}
+{{- $stackName := required "stackName is required" .Values.stackName }}
 ---
 # Dedicated cluster admin role (assumable by account root for break-glass)
 apiVersion: eks.services.k8s.aws/v1alpha1
 kind: AccessEntry
 metadata:
   name: cluster-admin-access
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
     services.k8s.aws/deletion-policy: retain
 spec:
-  clusterName: ${STACK_NAME}-cluster
-  principalARN: "arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-cluster-admin-access-role"
+  clusterName: {{ $stackName }}-cluster
+  principalARN: "arn:aws:iam::{{ $accountId }}:role/{{ $stackName }}-cluster-admin-access-role"
   type: STANDARD
   accessPolicies:
   - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
@@ -25,16 +26,15 @@ apiVersion: eks.services.k8s.aws/v1alpha1
 kind: AccessEntry
 metadata:
   name: admin-access
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
     services.k8s.aws/deletion-policy: retain
     services.k8s.aws/adoption-policy: adopt
-    services.k8s.aws/adoption-fields: '{"clusterName": "${STACK_NAME}-cluster", "principalARN": "arn:aws:iam::${ACCOUNT_ID}:role/Admin"}'
+    services.k8s.aws/adoption-fields: '{"clusterName": "{{ $stackName }}-cluster", "principalARN": "arn:aws:iam::{{ $accountId }}:role/Admin"}'
 spec:
-  clusterName: ${STACK_NAME}-cluster
-  principalARN: "arn:aws:iam::${ACCOUNT_ID}:role/Admin"
+  clusterName: {{ $stackName }}-cluster
+  principalARN: "arn:aws:iam::{{ $accountId }}:role/Admin"
   type: STANDARD
   accessPolicies:
   - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
@@ -46,14 +46,13 @@ apiVersion: eks.services.k8s.aws/v1alpha1
 kind: AccessEntry
 metadata:
   name: readonly-access
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
     services.k8s.aws/deletion-policy: retain
 spec:
-  clusterName: ${STACK_NAME}-cluster
-  principalARN: "arn:aws:iam::${ACCOUNT_ID}:role/ReadOnly"
+  clusterName: {{ $stackName }}-cluster
+  principalARN: "arn:aws:iam::{{ $accountId }}:role/ReadOnly"
   type: STANDARD
   accessPolicies:
   - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminViewPolicy
