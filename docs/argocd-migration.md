@@ -12,8 +12,8 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 | | |
 |---|---|
 | Kustomizations / HelmReleases Ready | 27/27, 17/17 |
-| Argo CD Applications | 12, all Synced/Healthy, all manual sync |
-| Cut over | **10** — every ACK path |
+| Argo CD Applications | 12, all Synced/Healthy |
+| Cut over | **10** — every ACK path, Argo CD-reconciled (`automated`, prune off) |
 | ACK CRs | 63, all Argo CD-tracked, 0 deleting |
 | Still on Flux | `prow-build-cluster-connection`, `prow-mirror` |
 
@@ -72,7 +72,12 @@ Prow images and blocks up to an hour. `terraform untaint` it if unwanted.
 2. Set `suspend: true` on the path's **HelmRelease, in git**.
 3. Trigger one sync by patching the Application's `operation`. Do not enable `automated`.
 4. Confirm each `uid` held and each object now carries `argocd.argoproj.io/tracking-id`.
-5. Only then consider `automated`/`prune`.
+5. Set `automated = true` on the path in `bootstrap/argocd-applications.tf`. Until you do,
+   the path has **no** reconciler: helm-controller ignores a suspended HelmRelease and a
+   manual Application applies nothing, so chart changes sit in git doing nothing. Manual
+   sync is only correct for the window between creating an Application and cutting over.
+   `prune` stays false everywhere; `selfHeal` too, so Argo CD does not fight manual
+   intervention mid-diagnosis.
 
 Suspend must be **in git**: the root `test-infra` Kustomization re-applies every spec, so a
 `kubectl patch` suspend is silently reverted and both reconcilers resume owning the objects.

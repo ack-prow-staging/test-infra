@@ -73,51 +73,61 @@ locals {
       path             = "flux/ack/charts/ack-capability-role"
       target_namespace = "ack-system"
       values           = ["accountId", "region", "stackName"]
+      automated        = true
     }
     ack-capability = {
       path             = "flux/ack/charts/ack-capability"
       target_namespace = "ack-system"
       values           = ["accountId", "stackName"]
+      automated        = true
     }
     ack-cluster = {
       path             = "flux/ack/charts/ack-cluster"
       target_namespace = "ack-system"
       values           = ["accountId", "stackName"]
+      automated        = true
     }
     ack-addons-roles = {
       path             = "flux/ack/charts/ack-addons-roles"
       target_namespace = "ack-system"
       values           = ["stackName"]
+      automated        = true
     }
     ack-addons = {
       path             = "flux/ack/charts/ack-addons"
       target_namespace = "ack-system"
       values           = ["accountId", "stackName"]
+      automated        = true
     }
     ack-pod-identity-roles = {
       path             = "flux/ack/charts/ack-pod-identity-roles"
       target_namespace = "ack-system"
       values           = ["accountId", "publishAccountId", "region", "stackName"]
+      automated        = true
     }
     ack-pod-identities = {
       path             = "flux/ack/charts/ack-pod-identities"
       target_namespace = "ack-system"
       values           = ["accountId", "stackName"]
+      automated        = true
     }
     ack-prow = {
       path             = "flux/ack/charts/ack-prow"
       target_namespace = "ack-system"
       values           = ["accountId", "prowDomain", "stackName"]
+      automated        = true
     }
     ack-flux = {
       path             = "flux/ack/charts/ack-flux"
       target_namespace = "ack-system"
       values           = ["ghcrPtcSecretArn"]
+      automated        = true
     }
     ack-build-infra = {
       path             = "flux/ack/charts/ack-build-infra"
       target_namespace = "ack-system"
       values           = ["accountId", "region", "stackName"]
+      automated        = true
     }
     prow-build-cluster-connection = {
       # flux-system, not ack-system: the Job writes build-cluster-kubeconfig there and
@@ -176,16 +186,36 @@ resource "kubernetes_manifest" "argocd_application" {
         namespace = each.value.target_namespace
       }
 
-      syncPolicy = {
-        # No `automated` block: manual sync. Nothing is applied until a human or a
-        # later change enables it. See the header for why.
+      syncPolicy = merge({
         syncOptions = [
           "ServerSideApply=true",
           # Namespaces are owned by prow-namespaces.yaml and by Terraform, never by a
           # chart, so Argo CD must not create them either.
           "CreateNamespace=false",
         ]
-      }
+        },
+        # automated is set only on paths that are cut over, and it is what makes the
+        # cutover complete rather than merely started. Once a path's HelmRelease is
+        # suspended, helm-controller ignores it; with sync still manual, Argo CD applies
+        # nothing either, so a change to that chart would be reconciled by NEITHER
+        # reconciler and would sit in git doing nothing. Manual sync is correct only for
+        # the window between creating an Application and cutting its path over.
+        #
+        # prune stays false everywhere. Argo CD deleting whatever its rendered set does
+        # not contain is the failure this whole migration was shaped to avoid, and it is
+        # not needed for reconciliation - only for garbage collection, which nothing
+        # requires yet.
+        #
+        # selfHeal is false as well, deliberately. It reverts live changes Argo CD did not
+        # make, which during a migration means fighting a human mid-diagnosis. Without it
+        # Argo CD syncs on git changes and leaves manual intervention alone.
+        lookup(each.value, "automated", false) ? {
+          automated = {
+            prune    = false
+            selfHeal = false
+          }
+        } : {}
+      )
 
       # NO ignoreDifferences, deliberately. ACK late-initialises fields the charts never
       # set - addonVersion and encryptionConfiguration and registryID, maxSessionDuration
