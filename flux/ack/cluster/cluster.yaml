@@ -23,6 +23,14 @@ spec:
   resourcesVPCConfig:
     endpointPublicAccess: true
     endpointPrivateAccess: true
+    # Stated explicitly even though it is the EKS default. Omitted, ACK cannot tell its
+    # desired state already matches, issues an update anyway, and EKS rejects it with
+    # "InvalidParameterException: Cluster is already at the desired configuration ...
+    # Public Endpoint Restrictions: [0.0.0.0/0]". That leaves the CR Ready=False
+    # forever, and because Flux health checks read the Ready condition, ack-cluster
+    # never reconciles and every Kustomization behind it stays DependencyNotReady.
+    publicAccessCidrs:
+    - "0.0.0.0/0"
   accessConfig:
     authenticationMode: API
   logging:
