@@ -1,16 +1,19 @@
 # Prow IAM Roles - managed by ACK
+{{- $accountId := required "accountId is required" .Values.accountId }}
+{{- $publishAccountId := required "publishAccountId is required" .Values.publishAccountId }}
+{{- $region := required "region is required" .Values.region }}
+{{- $stackName := required "stackName is required" .Values.stackName }}
 ---
 # Deployment Role - used by Prow core components (deck, hook, etc.)
 apiVersion: iam.services.k8s.aws/v1alpha1
 kind: Role
 metadata:
   name: prow-deployment-role
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  name: ${STACK_NAME}-prow-deployment-role
+  name: {{ $stackName }}-prow-deployment-role
   assumeRolePolicyDocument: |
     {
       "Version": "2012-10-17",
@@ -33,8 +36,8 @@ spec:
             "Effect": "Allow",
             "Action": ["s3:Get*", "s3:List*", "s3:Put*", "s3:DeleteObject"],
             "Resource": [
-              "arn:aws:s3:::${STACK_NAME}-prow-logs-${ACCOUNT_ID}",
-              "arn:aws:s3:::${STACK_NAME}-prow-logs-${ACCOUNT_ID}/*"
+              "arn:aws:s3:::{{ $stackName }}-prow-logs-{{ $accountId }}",
+              "arn:aws:s3:::{{ $stackName }}-prow-logs-{{ $accountId }}/*"
             ]
           }
         ]
@@ -46,7 +49,7 @@ spec:
           {
             "Effect": "Allow",
             "Action": ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
-            "Resource": "arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:ack/prow/*"
+            "Resource": "arn:aws:secretsmanager:{{ $region }}:{{ $accountId }}:secret:ack/prow/*"
           }
         ]
       }
@@ -56,12 +59,11 @@ apiVersion: iam.services.k8s.aws/v1alpha1
 kind: Role
 metadata:
   name: prow-postsubmit-role
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  name: ${STACK_NAME}-prow-postsubmit-role
+  name: {{ $stackName }}-prow-postsubmit-role
   assumeRolePolicyDocument: |
     {
       "Version": "2012-10-17",
@@ -84,8 +86,8 @@ spec:
             "Effect": "Allow",
             "Action": ["s3:Get*", "s3:List*", "s3:Put*", "s3:DeleteObject"],
             "Resource": [
-              "arn:aws:s3:::${STACK_NAME}-prow-logs-${ACCOUNT_ID}",
-              "arn:aws:s3:::${STACK_NAME}-prow-logs-${ACCOUNT_ID}/*"
+              "arn:aws:s3:::{{ $stackName }}-prow-logs-{{ $accountId }}",
+              "arn:aws:s3:::{{ $stackName }}-prow-logs-{{ $accountId }}/*"
             ]
           }
         ]
@@ -110,8 +112,8 @@ spec:
               "ecr-public:BatchCheckLayerAvailability"
             ],
             "Resource": [
-              "arn:aws:ecr-public::${ACCOUNT_ID}:registry/*",
-              "arn:aws:ecr-public::${ACCOUNT_ID}:repository/*"
+              "arn:aws:ecr-public::{{ $accountId }}:registry/*",
+              "arn:aws:ecr-public::{{ $accountId }}:repository/*"
             ]
           },
           {
@@ -133,7 +135,7 @@ spec:
           {
             "Effect": "Allow",
             "Action": ["ssm:GetParameter"],
-            "Resource": "arn:aws:ssm:${REGION}:${ACCOUNT_ID}:parameter/*"
+            "Resource": "arn:aws:ssm:{{ $region }}:{{ $accountId }}:parameter/*"
           }
         ]
       }
@@ -144,7 +146,7 @@ spec:
           {
             "Effect": "Allow",
             "Action": ["sts:AssumeRole", "sts:TagSession"],
-            "Resource": "arn:aws:iam::${PUBLISH_ACCOUNT_ID}:role/*"
+            "Resource": "arn:aws:iam::{{ $publishAccountId }}:role/*"
           }
         ]
       }
@@ -155,7 +157,7 @@ spec:
           {
             "Effect": "Allow",
             "Action": ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
-            "Resource": "arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:ack/prow/*"
+            "Resource": "arn:aws:secretsmanager:{{ $region }}:{{ $accountId }}:secret:ack/prow/*"
           }
         ]
       }
@@ -165,12 +167,11 @@ apiVersion: iam.services.k8s.aws/v1alpha1
 kind: Role
 metadata:
   name: prow-presubmit-role
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  name: ${STACK_NAME}-prow-presubmit-role
+  name: {{ $stackName }}-prow-presubmit-role
   assumeRolePolicyDocument: |
     {
       "Version": "2012-10-17",
@@ -193,8 +194,8 @@ spec:
             "Effect": "Allow",
             "Action": ["s3:Get*", "s3:List*", "s3:Put*", "s3:DeleteObject"],
             "Resource": [
-              "arn:aws:s3:::${STACK_NAME}-prow-logs-${ACCOUNT_ID}",
-              "arn:aws:s3:::${STACK_NAME}-prow-logs-${ACCOUNT_ID}/*"
+              "arn:aws:s3:::{{ $stackName }}-prow-logs-{{ $accountId }}",
+              "arn:aws:s3:::{{ $stackName }}-prow-logs-{{ $accountId }}/*"
             ]
           }
         ]
@@ -226,8 +227,8 @@ spec:
             "Effect": "Allow",
             "Action": ["ssm:GetParameter"],
             "Resource": [
-              "arn:aws:ssm:${REGION}:${ACCOUNT_ID}:parameter/ack/prow/service_team_role/*",
-              "arn:aws:ssm:${REGION}:${ACCOUNT_ID}:parameter/ack/prow/carm_role"
+              "arn:aws:ssm:{{ $region }}:{{ $accountId }}:parameter/ack/prow/service_team_role/*",
+              "arn:aws:ssm:{{ $region }}:{{ $accountId }}:parameter/ack/prow/carm_role"
             ]
           }
         ]
@@ -260,12 +261,11 @@ apiVersion: iam.services.k8s.aws/v1alpha1
 kind: Role
 metadata:
   name: prow-periodic-role
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  name: ${STACK_NAME}-prow-periodic-role
+  name: {{ $stackName }}-prow-periodic-role
   assumeRolePolicyDocument: |
     {
       "Version": "2012-10-17",
@@ -288,8 +288,8 @@ spec:
             "Effect": "Allow",
             "Action": ["s3:Get*", "s3:List*", "s3:Put*", "s3:DeleteObject"],
             "Resource": [
-              "arn:aws:s3:::${STACK_NAME}-prow-logs-${ACCOUNT_ID}",
-              "arn:aws:s3:::${STACK_NAME}-prow-logs-${ACCOUNT_ID}/*"
+              "arn:aws:s3:::{{ $stackName }}-prow-logs-{{ $accountId }}",
+              "arn:aws:s3:::{{ $stackName }}-prow-logs-{{ $accountId }}/*"
             ]
           }
         ]
@@ -301,7 +301,7 @@ spec:
           {
             "Effect": "Allow",
             "Action": ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
-            "Resource": "arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:ack/prow/*"
+            "Resource": "arn:aws:secretsmanager:{{ $region }}:{{ $accountId }}:secret:ack/prow/*"
           }
         ]
       }
@@ -313,12 +313,11 @@ apiVersion: iam.services.k8s.aws/v1alpha1
 kind: Role
 metadata:
   name: prow-workflow-runner-role
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  name: ${STACK_NAME}-prow-workflow-runner-role
+  name: {{ $stackName }}-prow-workflow-runner-role
   assumeRolePolicyDocument: |
     {
       "Version": "2012-10-17",
@@ -341,8 +340,8 @@ spec:
             "Effect": "Allow",
             "Action": ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
             "Resource": [
-              "arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:ack/prow/github-pat-token-*",
-              "arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:ack/prow/api-model-kb-*"
+              "arn:aws:secretsmanager:{{ $region }}:{{ $accountId }}:secret:ack/prow/github-pat-token-*",
+              "arn:aws:secretsmanager:{{ $region }}:{{ $accountId }}:secret:ack/prow/api-model-kb-*"
             ]
           }
         ]
@@ -355,8 +354,8 @@ spec:
             "Effect": "Allow",
             "Action": ["s3:Get*", "s3:List*", "s3:Put*", "s3:DeleteObject"],
             "Resource": [
-              "arn:aws:s3:::${STACK_NAME}-prow-logs-${ACCOUNT_ID}",
-              "arn:aws:s3:::${STACK_NAME}-prow-logs-${ACCOUNT_ID}/*"
+              "arn:aws:s3:::{{ $stackName }}-prow-logs-{{ $accountId }}",
+              "arn:aws:s3:::{{ $stackName }}-prow-logs-{{ $accountId }}/*"
             ]
           }
         ]
@@ -367,12 +366,11 @@ apiVersion: iam.services.k8s.aws/v1alpha1
 kind: Role
 metadata:
   name: prow-mirror-role
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  name: ${STACK_NAME}-prow-mirror-role
+  name: {{ $stackName }}-prow-mirror-role
   assumeRolePolicyDocument: |
     {
       "Version": "2012-10-17",
@@ -394,7 +392,7 @@ spec:
           {
             "Effect": "Allow",
             "Action": ["ecr:*"],
-            "Resource": "arn:aws:ecr:${REGION}:${ACCOUNT_ID}:repository/prow/*"
+            "Resource": "arn:aws:ecr:{{ $region }}:{{ $accountId }}:repository/prow/*"
           },
           {
             "Effect": "Allow",
