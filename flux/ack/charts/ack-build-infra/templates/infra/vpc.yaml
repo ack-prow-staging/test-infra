@@ -1,3 +1,4 @@
+{{- $stackName := required "stackName is required" .Values.stackName }}
 # Build cluster VPC + Internet Gateway — created by ACK EC2 controller.
 #
 # Non-overlapping CIDR (10.1.0.0/16) so the build cluster's network is isolated
@@ -8,7 +9,6 @@ apiVersion: ec2.services.k8s.aws/v1alpha1
 kind: VPC
 metadata:
   name: build-vpc
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -20,13 +20,12 @@ spec:
   enableNetworkAddressUsageMetrics: false
   tags:
   - key: Name
-    value: ${STACK_NAME}-build-vpc
+    value: {{ $stackName }}-build-vpc
 ---
 apiVersion: ec2.services.k8s.aws/v1alpha1
 kind: InternetGateway
 metadata:
   name: build-igw
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -36,4 +35,4 @@ spec:
       name: build-vpc
   tags:
   - key: Name
-    value: ${STACK_NAME}-build-igw
+    value: {{ $stackName }}-build-igw

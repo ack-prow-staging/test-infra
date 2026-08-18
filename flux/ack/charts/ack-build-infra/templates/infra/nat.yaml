@@ -1,3 +1,4 @@
+{{- $stackName := required "stackName is required" .Values.stackName }}
 # Build cluster NAT — created by ACK EC2 controller.
 #
 # Single NAT gateway (matches bootstrap/cluster.tf single_nat_gateway = true) in
@@ -9,20 +10,18 @@ apiVersion: ec2.services.k8s.aws/v1alpha1
 kind: ElasticIPAddress
 metadata:
   name: build-nat-eip
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
   tags:
   - key: Name
-    value: ${STACK_NAME}-build-nat-eip
+    value: {{ $stackName }}-build-nat-eip
 ---
 apiVersion: ec2.services.k8s.aws/v1alpha1
 kind: NATGateway
 metadata:
   name: build-natgw
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -36,4 +35,4 @@ spec:
       name: build-nat-eip
   tags:
   - key: Name
-    value: ${STACK_NAME}-build-natgw
+    value: {{ $stackName }}-build-natgw

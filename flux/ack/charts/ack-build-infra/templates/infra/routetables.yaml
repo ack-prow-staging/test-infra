@@ -1,3 +1,4 @@
+{{- $stackName := required "stackName is required" .Values.stackName }}
 # Build cluster route tables — created by ACK EC2 controller.
 #
 # Public RT routes 0.0.0.0/0 to the Internet Gateway; private RT routes
@@ -9,7 +10,6 @@ apiVersion: ec2.services.k8s.aws/v1alpha1
 kind: RouteTable
 metadata:
   name: build-rt-public
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -24,13 +24,12 @@ spec:
         name: build-igw
   tags:
   - key: Name
-    value: ${STACK_NAME}-build-rt-public
+    value: {{ $stackName }}-build-rt-public
 ---
 apiVersion: ec2.services.k8s.aws/v1alpha1
 kind: RouteTable
 metadata:
   name: build-rt-private
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -45,4 +44,4 @@ spec:
         name: build-natgw
   tags:
   - key: Name
-    value: ${STACK_NAME}-build-rt-private
+    value: {{ $stackName }}-build-rt-private

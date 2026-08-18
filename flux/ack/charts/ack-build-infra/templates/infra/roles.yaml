@@ -1,22 +1,24 @@
+{{- $accountId := required "accountId is required" .Values.accountId }}
+{{- $region := required "region is required" .Values.region }}
+{{- $stackName := required "stackName is required" .Values.stackName }}
 # Build cluster IAM roles, reconciled by the ACK IAM controller on the
 # control-plane cluster. Mirror the roles bootstrap/cluster.tf creates for the
 # control-plane cluster, but here ACK owns them end-to-end.
 #
 # The capability role's IAMManagement policy is scoped to
-# arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-* , so every role below (named
-# ${STACK_NAME}-build-*) is within its permission boundary.
+# arn:aws:iam::{{ $accountId }}:role/{{ $stackName }}-* , so every role below (named
+# {{ $stackName }}-build-*) is within its permission boundary.
 ---
 # EKS cluster role — assumed by the EKS service to manage the cluster.
 apiVersion: iam.services.k8s.aws/v1alpha1
 kind: Role
 metadata:
   name: build-cluster-role
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  name: ${STACK_NAME}-build-cluster-role
+  name: {{ $stackName }}-build-cluster-role
   assumeRolePolicyDocument: |
     {
       "Version": "2012-10-17",
@@ -41,12 +43,11 @@ apiVersion: iam.services.k8s.aws/v1alpha1
 kind: Role
 metadata:
   name: build-node-role
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  name: ${STACK_NAME}-build-node-role
+  name: {{ $stackName }}-build-node-role
   assumeRolePolicyDocument: |
     {
       "Version": "2012-10-17",
@@ -69,7 +70,7 @@ spec:
           {
             "Effect": "Allow",
             "Action": ["ecr:CreateRepository", "ecr:BatchImportUpstreamImage"],
-            "Resource": ["arn:aws:ecr:${REGION}:${ACCOUNT_ID}:repository/fluxcd/*"]
+            "Resource": ["arn:aws:ecr:{{ $region }}:{{ $accountId }}:repository/fluxcd/*"]
           }
         ]
       }
@@ -81,19 +82,18 @@ apiVersion: iam.services.k8s.aws/v1alpha1
 kind: Role
 metadata:
   name: build-cluster-admin-access-role
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  name: ${STACK_NAME}-build-cluster-admin-access-role
+  name: {{ $stackName }}-build-cluster-admin-access-role
   assumeRolePolicyDocument: |
     {
       "Version": "2012-10-17",
       "Statement": [
         {
           "Effect": "Allow",
-          "Principal": { "AWS": "arn:aws:iam::${ACCOUNT_ID}:root" },
+          "Principal": { "AWS": "arn:aws:iam::{{ $accountId }}:root" },
           "Action": "sts:AssumeRole"
         }
       ]
@@ -106,7 +106,7 @@ spec:
           {
             "Effect": "Allow",
             "Action": ["eks:DescribeCluster"],
-            "Resource": "arn:aws:eks:${REGION}:${ACCOUNT_ID}:cluster/${STACK_NAME}-build-cluster"
+            "Resource": "arn:aws:eks:{{ $region }}:{{ $accountId }}:cluster/{{ $stackName }}-build-cluster"
           }
         ]
       }

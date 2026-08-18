@@ -1,3 +1,4 @@
+{{- $stackName := required "stackName is required" .Values.stackName }}
 # Flux Pod Identity for build-cluster remote-apply.
 #
 # Binds the control-plane Flux kustomize-controller to the build-cluster IAM
@@ -17,12 +18,11 @@ apiVersion: eks.services.k8s.aws/v1alpha1
 kind: PodIdentityAssociation
 metadata:
   name: flux-build-cluster-pod-identity
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  clusterName: ${STACK_NAME}-cluster
+  clusterName: {{ $stackName }}-cluster
   namespace: flux-system
   serviceAccount: kustomize-controller
   roleRef:

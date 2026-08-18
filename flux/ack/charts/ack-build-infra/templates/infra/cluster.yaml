@@ -1,3 +1,4 @@
+{{- $stackName := required "stackName is required" .Values.stackName }}
 # Build cluster — created (not adopted) by the ACK EKS controller running on the
 # control-plane cluster, against the AWS API in the same account.
 #   - roleRef     → the cluster IAM role CR (roles.yaml)
@@ -10,13 +11,12 @@ apiVersion: eks.services.k8s.aws/v1alpha1
 kind: Cluster
 metadata:
   name: build-cluster
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
     services.k8s.aws/deletion-policy: retain
 spec:
-  name: ${STACK_NAME}-build-cluster
+  name: {{ $stackName }}-build-cluster
   version: "1.35"
   roleRef:
     from:

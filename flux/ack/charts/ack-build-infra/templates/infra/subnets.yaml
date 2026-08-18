@@ -1,3 +1,4 @@
+{{- $stackName := required "stackName is required" .Values.stackName }}
 # Build cluster subnets — created by ACK EC2 controller.
 #
 # CIDR layout mirrors bootstrap/cluster.tf's cidrsubnet(cidr, 4, i) scheme on a
@@ -12,7 +13,6 @@ apiVersion: ec2.services.k8s.aws/v1alpha1
 kind: Subnet
 metadata:
   name: build-subnet-private-a
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -27,7 +27,7 @@ spec:
       name: build-rt-private
   tags:
   - key: Name
-    value: ${STACK_NAME}-build-private-us-west-2a
+    value: {{ $stackName }}-build-private-us-west-2a
   - key: kubernetes.io/role/internal-elb
     value: "1"
 ---
@@ -35,7 +35,6 @@ apiVersion: ec2.services.k8s.aws/v1alpha1
 kind: Subnet
 metadata:
   name: build-subnet-private-b
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -50,7 +49,7 @@ spec:
       name: build-rt-private
   tags:
   - key: Name
-    value: ${STACK_NAME}-build-private-us-west-2b
+    value: {{ $stackName }}-build-private-us-west-2b
   - key: kubernetes.io/role/internal-elb
     value: "1"
 ---
@@ -58,7 +57,6 @@ apiVersion: ec2.services.k8s.aws/v1alpha1
 kind: Subnet
 metadata:
   name: build-subnet-public-a
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -74,7 +72,7 @@ spec:
       name: build-rt-public
   tags:
   - key: Name
-    value: ${STACK_NAME}-build-public-us-west-2a
+    value: {{ $stackName }}-build-public-us-west-2a
   - key: kubernetes.io/role/elb
     value: "1"
 ---
@@ -82,7 +80,6 @@ apiVersion: ec2.services.k8s.aws/v1alpha1
 kind: Subnet
 metadata:
   name: build-subnet-public-b
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -98,6 +95,6 @@ spec:
       name: build-rt-public
   tags:
   - key: Name
-    value: ${STACK_NAME}-build-public-us-west-2b
+    value: {{ $stackName }}-build-public-us-west-2b
   - key: kubernetes.io/role/elb
     value: "1"

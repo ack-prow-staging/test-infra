@@ -1,3 +1,5 @@
+{{- $accountId := required "accountId is required" .Values.accountId }}
+{{- $stackName := required "stackName is required" .Values.stackName }}
 # Build cluster Pod Identity Associations, reconciled by the control-plane ACK
 # EKS controller. They bind a build-cluster service account to an IAM role via
 # standard Pod Identity (pods.eks.amazonaws.com). The roles already exist in this
@@ -14,7 +16,6 @@ apiVersion: eks.services.k8s.aws/v1alpha1
 kind: PodIdentityAssociation
 metadata:
   name: prow-build-presubmit-pod-identity
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -24,4 +25,4 @@ spec:
       name: build-cluster
   namespace: test-pods
   serviceAccount: pre-submit-service-account
-  roleARN: arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-prow-presubmit-role
+  roleARN: arn:aws:iam::{{ $accountId }}:role/{{ $stackName }}-prow-presubmit-role

@@ -1,3 +1,5 @@
+{{- $accountId := required "accountId is required" .Values.accountId }}
+{{- $stackName := required "stackName is required" .Values.stackName }}
 # Build cluster EKS Access Entries, reconciled by the control-plane ACK EKS
 # controller. They grant Kubernetes API access to the build cluster: a
 # break-glass admin role, the account's Admin/ReadOnly roles for humans, the
@@ -15,7 +17,6 @@ apiVersion: eks.services.k8s.aws/v1alpha1
 kind: AccessEntry
 metadata:
   name: build-cluster-admin-access
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -24,7 +25,7 @@ spec:
   clusterRef:
     from:
       name: build-cluster
-  principalARN: "arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-build-cluster-admin-access-role"
+  principalARN: "arn:aws:iam::{{ $accountId }}:role/{{ $stackName }}-build-cluster-admin-access-role"
   type: STANDARD
   accessPolicies:
   - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
@@ -36,7 +37,6 @@ apiVersion: eks.services.k8s.aws/v1alpha1
 kind: AccessEntry
 metadata:
   name: build-admin-access
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -45,7 +45,7 @@ spec:
   clusterRef:
     from:
       name: build-cluster
-  principalARN: "arn:aws:iam::${ACCOUNT_ID}:role/Admin"
+  principalARN: "arn:aws:iam::{{ $accountId }}:role/Admin"
   type: STANDARD
   accessPolicies:
   - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
@@ -57,7 +57,6 @@ apiVersion: eks.services.k8s.aws/v1alpha1
 kind: AccessEntry
 metadata:
   name: build-readonly-access
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -66,7 +65,7 @@ spec:
   clusterRef:
     from:
       name: build-cluster
-  principalARN: "arn:aws:iam::${ACCOUNT_ID}:role/ReadOnly"
+  principalARN: "arn:aws:iam::{{ $accountId }}:role/ReadOnly"
   type: STANDARD
   accessPolicies:
   - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminViewPolicy
@@ -80,7 +79,6 @@ apiVersion: eks.services.k8s.aws/v1alpha1
 kind: AccessEntry
 metadata:
   name: prow-deployment-build-access
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -89,7 +87,7 @@ spec:
   clusterRef:
     from:
       name: build-cluster
-  principalARN: "arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-prow-deployment-role"
+  principalARN: "arn:aws:iam::{{ $accountId }}:role/{{ $stackName }}-prow-deployment-role"
   type: STANDARD
   kubernetesGroups:
   - prow-build-cluster
@@ -101,7 +99,6 @@ apiVersion: eks.services.k8s.aws/v1alpha1
 kind: AccessEntry
 metadata:
   name: flux-build-cluster-access
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -110,7 +107,7 @@ spec:
   clusterRef:
     from:
       name: build-cluster
-  principalARN: "arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-flux-build-cluster-role"
+  principalARN: "arn:aws:iam::{{ $accountId }}:role/{{ $stackName }}-flux-build-cluster-role"
   type: STANDARD
   accessPolicies:
   - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
@@ -136,7 +133,6 @@ apiVersion: eks.services.k8s.aws/v1alpha1
 kind: AccessEntry
 metadata:
   name: build-node-access
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -146,7 +142,7 @@ spec:
   clusterRef:
     from:
       name: build-cluster
-  principalARN: "arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-build-node-role"
+  principalARN: "arn:aws:iam::{{ $accountId }}:role/{{ $stackName }}-build-node-role"
   type: EC2
   accessPolicies:
   - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSAutoNodePolicy
