@@ -1,3 +1,5 @@
+{{- $accountId := required "accountId is required" .Values.accountId }}
+{{- $stackName := required "stackName is required" .Values.stackName }}
 # Prow Pod Identity Associations - links IAM roles to service accounts.
 # Uses hardcoded roleARN references. Roles are created first via the
 # ack-pod-identity-roles Kustomization before this is applied.
@@ -6,82 +8,76 @@ apiVersion: eks.services.k8s.aws/v1alpha1
 kind: PodIdentityAssociation
 metadata:
   name: prow-deployment-pod-identity
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  clusterName: ${STACK_NAME}-cluster
+  clusterName: {{ $stackName }}-cluster
   namespace: prow
   serviceAccount: prow-deployment-service-account
-  roleARN: arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-prow-deployment-role
+  roleARN: arn:aws:iam::{{ $accountId }}:role/{{ $stackName }}-prow-deployment-role
 ---
 apiVersion: eks.services.k8s.aws/v1alpha1
 kind: PodIdentityAssociation
 metadata:
   name: prow-postsubmit-pod-identity
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  clusterName: ${STACK_NAME}-cluster
+  clusterName: {{ $stackName }}-cluster
   namespace: test-pods
   serviceAccount: post-submit-service-account
-  roleARN: arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-prow-postsubmit-role
+  roleARN: arn:aws:iam::{{ $accountId }}:role/{{ $stackName }}-prow-postsubmit-role
 ---
 apiVersion: eks.services.k8s.aws/v1alpha1
 kind: PodIdentityAssociation
 metadata:
   name: prow-presubmit-pod-identity
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  clusterName: ${STACK_NAME}-cluster
+  clusterName: {{ $stackName }}-cluster
   namespace: test-pods
   serviceAccount: pre-submit-service-account
-  roleARN: arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-prow-presubmit-role
+  roleARN: arn:aws:iam::{{ $accountId }}:role/{{ $stackName }}-prow-presubmit-role
 ---
 apiVersion: eks.services.k8s.aws/v1alpha1
 kind: PodIdentityAssociation
 metadata:
   name: prow-periodic-pod-identity
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  clusterName: ${STACK_NAME}-cluster
+  clusterName: {{ $stackName }}-cluster
   namespace: test-pods
   serviceAccount: periodic-service-account
-  roleARN: arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-prow-periodic-role
+  roleARN: arn:aws:iam::{{ $accountId }}:role/{{ $stackName }}-prow-periodic-role
 ---
 apiVersion: eks.services.k8s.aws/v1alpha1
 kind: PodIdentityAssociation
 metadata:
   name: prow-mirror-pod-identity
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  clusterName: ${STACK_NAME}-cluster
+  clusterName: {{ $stackName }}-cluster
   namespace: test-pods
   serviceAccount: prow-mirror-service-account
-  roleARN: arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-prow-mirror-role
+  roleARN: arn:aws:iam::{{ $accountId }}:role/{{ $stackName }}-prow-mirror-role
 ---
 apiVersion: eks.services.k8s.aws/v1alpha1
 kind: PodIdentityAssociation
 metadata:
   name: prow-workflow-runner-pod-identity
-  namespace: ack-system
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 spec:
-  clusterName: ${STACK_NAME}-cluster
+  clusterName: {{ $stackName }}-cluster
   namespace: test-pods
   serviceAccount: workflow-runner
-  roleARN: arn:aws:iam::${ACCOUNT_ID}:role/${STACK_NAME}-prow-workflow-runner-role
+  roleARN: arn:aws:iam::{{ $accountId }}:role/{{ $stackName }}-prow-workflow-runner-role
