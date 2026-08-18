@@ -1,0 +1,3 @@
+# Supplied by the HelmRelease from self-managed-vars. Left empty rather than
+# defaulted so a missing value fails at render time via `required`.
+prowImagesRepoUri: ""

@@ -1,0 +1,38 @@
+# Renders flux/prow/charts/prow-build-cluster-connection instead of the
+# token-substituted manifests.
+#
+# targetNamespace is flux-system, but every template keeps its explicit
+# metadata.namespace: the Role and RoleBinding that read the ACK CRs live in
+# ack-system while the Job, ServiceAccount and write RBAC live in flux-system.
+# Stripping those namespaces would collapse the chart onto one namespace and break
+# the cross-namespace read.
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: prow-build-cluster-connection
+  namespace: flux-system
+spec:
+  interval: 60m
+  targetNamespace: flux-system
+  chart:
+    spec:
+      chart: ./flux/prow/charts/prow-build-cluster-connection
+      reconcileStrategy: Revision
+      sourceRef:
+        kind: GitRepository
+        name: test-infra
+        namespace: flux-system
+      interval: 60m
+  install:
+    createNamespace: false
+  upgrade:
+    # force: true for the same reason as prow-mirror: a Job's spec.template is
+    # immutable, and the Kustomization this replaces already ran with force: true.
+    # The chart holds only the Job and its RBAC, nothing AWS-backed.
+    force: true
+  valuesFrom:
+  - kind: ConfigMap
+    name: self-managed-vars
+    valuesKey: PROW_IMAGES_REPO_URI
+    targetPath: prowImagesRepoUri

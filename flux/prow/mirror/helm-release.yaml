@@ -1,0 +1,58 @@
+# Renders flux/prow/charts/prow-mirror instead of the token-substituted manifest.
+#
+# targetNamespace is test-pods, matching where the Job has always run. The
+# template keeps its explicit metadata.namespace, so this only supplies the
+# release namespace.
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: prow-mirror
+  namespace: flux-system
+spec:
+  interval: 60m
+  targetNamespace: test-pods
+  chart:
+    spec:
+      chart: ./flux/prow/charts/prow-mirror
+      reconcileStrategy: Revision
+      sourceRef:
+        kind: GitRepository
+        name: test-infra
+        namespace: flux-system
+      interval: 60m
+  install:
+    createNamespace: false
+  upgrade:
+    # force: true here, unlike every ack release.
+    #
+    # A Job's spec.template is immutable, so changing the mirrored image tags
+    # cannot be applied in place - the Job has to be deleted and recreated. The
+    # Kustomization this replaces already ran with force: true for exactly that
+    # reason, so this preserves existing behaviour rather than introducing it.
+    #
+    # It is safe here only because this chart contains nothing but the Job: there
+    # is no AWS resource behind it, and the ECR repositories it writes into are
+    # owned by the ack-prow chart, which keeps force: false.
+    force: true
+  valuesFrom:
+  - kind: ConfigMap
+    name: self-managed-vars
+    valuesKey: ACCOUNT_ID
+    targetPath: accountId
+  - kind: ConfigMap
+    name: self-managed-vars
+    valuesKey: REGION
+    targetPath: region
+  - kind: ConfigMap
+    name: prow-version
+    valuesKey: PROW_VERSION
+    targetPath: prowVersion
+  - kind: ConfigMap
+    name: prow-version
+    valuesKey: PROW_PATCH_REVISION
+    targetPath: prowPatchRevision
+  - kind: ConfigMap
+    name: prow-version
+    valuesKey: TOOLS_VERSION
+    targetPath: toolsVersion
