@@ -30,5 +30,29 @@ spec:
   dependsOn:
   - name: ack-capability
   - name: ack-capability-role
-  wait: true
+  # wait: true health-checked all 23 objects in this path - the VPC, subnets, route
+  # tables, NAT gateway, IAM roles, access entries and the cluster itself. Gating the
+  # whole tree on all of them is fragile: every object must report Ready on the same
+  # reconcile, and a single one that never settles blocks the five Kustomizations
+  # downstream, which is what kept Prow down in staging. All 23 were individually
+  # Ready with matching observedGeneration, yet the aggregate check never completed
+  # because the path re-applies as "configured" each cycle.
+  #
+  # Gate instead on what dependents genuinely need: the build cluster existing, and
+  # the access entries that let Prow and Flux reach it. The rest of the path is still
+  # applied and reconciled, it just no longer decides whether the tree may proceed.
+  wait: false
+  healthChecks:
+  - apiVersion: eks.services.k8s.aws/v1alpha1
+    kind: Cluster
+    name: build-cluster
+    namespace: ack-system
+  - apiVersion: eks.services.k8s.aws/v1alpha1
+    kind: AccessEntry
+    name: flux-build-cluster-access
+    namespace: ack-system
+  - apiVersion: eks.services.k8s.aws/v1alpha1
+    kind: AccessEntry
+    name: prow-deployment-build-access
+    namespace: ack-system
   timeout: 30m
