@@ -154,6 +154,7 @@ locals {
     prow-mirror = {
       path             = "flux/prow/charts/prow-mirror"
       target_namespace = "test-pods"
+      automated        = true
       # prowVersion, toolsVersion and prowPatchRevision are deliberately absent:
       # they are static git-authored strings and now live as defaults in the chart's
       # values.yaml, not as per-environment parameters Terraform supplies.
