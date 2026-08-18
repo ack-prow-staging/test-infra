@@ -44,4 +44,11 @@ data:
   prowPatchRevision: {{ $prowPatchRevision | quote }}
   # The tag suffix the above produces, recorded so the mapping from these three values to
   # what actually lands in ECR does not have to be re-derived.
-  mirroredTagSuffix: {{ printf "-ack.%s" $prowPatchRevision | quote }}
+  #
+  # %v, not %s. prowPatchRevision arrives as a STRING from this chart's values.yaml but as
+  # an INTEGER from Flux's valuesFrom, which reads it out of the prow-version ConfigMap.
+  # printf "%s" on an int64 yields the literal text %!s(int64=1) - it does not error, it
+  # just writes a malformed value, which is the failure mode this migration exists to
+  # remove. %v renders both. The Job template's "-ack.{{ $prowPatchRevision }}" is
+  # type-agnostic for the same reason.
+  mirroredTagSuffix: {{ printf "-ack.%v" $prowPatchRevision | quote }}
