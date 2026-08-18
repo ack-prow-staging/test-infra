@@ -1,0 +1,184 @@
+################################################################################
+# Argo CD Applications for the converted chart paths.
+#
+# Terraform emits these rather than Git, because Terraform already owns the values.
+# The 29 chart parameters below are the same locals that populate the
+# self-managed-vars ConfigMap, so this is one hop shorter than Flux's route
+# (Terraform -> ConfigMap -> HelmRelease.valuesFrom -> chart) and needs nothing read
+# from the cluster at render time, which Argo CD cannot do: it renders off-cluster,
+# valuesFrom against a ConfigMap does not exist (argo-cd#12060), Helm's lookup
+# returns empty, and there is no repo-server here to attach a plugin to.
+# self-managed-vars is deleted in Phase 5, not replaced.
+#
+# THREE DELIBERATE SAFETY CHOICES, each mirroring something that already went wrong
+# once during this migration:
+#
+#   prune is NOT enabled. If Argo CD's rendered set does not exactly match what is
+#   live, prune deletes the difference. This is the same discipline that made
+#   prune: false a prerequisite on the Flux side, and it is why the earlier incident
+#   was survivable. Enable per Application only after its diff is confirmed empty.
+#
+#   automated sync is NOT enabled. Applications are created in manual sync so Argo CD
+#   computes the diff and applies nothing. Every object here already exists and was
+#   verified byte-identical, so the expected initial state is OutOfSync purely from
+#   reconciler ownership labels - Flux's kustomize.toolkit.fluxcd.io/* are present on
+#   live objects and absent from Argo CD's desired state. An OutOfSync Application
+#   here means labels, not content, and that must be confirmed before syncing.
+#
+#   ServerSideApply=true. Live objects carry field managers from kustomize-controller
+#   and from Helm. SSA transfers ownership field by field instead of fighting them.
+#
+# The four generated prow paths (prow-plugins, prow-jobs, prow-agent-workflows,
+# prow-build-cluster-resources) are deliberately absent. They still contain ${TOKEN}
+# placeholders and Argo CD has no substitution, so an Application would write
+# image: ${PROW_IMAGES_REPO_URI}:... into a Deployment and GITHUB_ORG:
+# ${TEST_INFRA_ORG} into the agent workflow config. They stay on Flux until their
+# per-environment kustomize overlays exist.
+################################################################################
+
+locals {
+  # Parameters every chart may draw from, keyed by the chart value name. Sourced from
+  # the same locals as self-managed-vars so the two cannot drift while both exist.
+  argocd_chart_values = {
+    stackName         = local.stack_name
+    accountId         = local.account_id
+    region            = var.region
+    publishAccountId  = var.publish_account_id
+    prowDomain        = var.prow_domain
+    ghcrPtcSecretArn  = data.aws_secretsmanager_secret.ghcr_ptc.arn
+    prowImagesRepoUri = local.prow_images_repo_uri
+  }
+
+  # One entry per converted chart path. `values` lists which parameters that chart
+  # requires; each is declared `required` in the chart, so a missing entry fails at
+  # render time rather than producing a truncated name or ARN.
+  argocd_applications = {
+    ack-capability-role = {
+      path             = "flux/ack/charts/ack-capability-role"
+      target_namespace = "ack-system"
+      values           = ["accountId", "region", "stackName"]
+    }
+    ack-capability = {
+      path             = "flux/ack/charts/ack-capability"
+      target_namespace = "ack-system"
+      values           = ["accountId", "stackName"]
+    }
+    ack-cluster = {
+      path             = "flux/ack/charts/ack-cluster"
+      target_namespace = "ack-system"
+      values           = ["accountId", "stackName"]
+    }
+    ack-addons-roles = {
+      path             = "flux/ack/charts/ack-addons-roles"
+      target_namespace = "ack-system"
+      values           = ["stackName"]
+    }
+    ack-addons = {
+      path             = "flux/ack/charts/ack-addons"
+      target_namespace = "ack-system"
+      values           = ["accountId", "stackName"]
+    }
+    ack-pod-identity-roles = {
+      path             = "flux/ack/charts/ack-pod-identity-roles"
+      target_namespace = "ack-system"
+      values           = ["accountId", "publishAccountId", "region", "stackName"]
+    }
+    ack-pod-identities = {
+      path             = "flux/ack/charts/ack-pod-identities"
+      target_namespace = "ack-system"
+      values           = ["accountId", "stackName"]
+    }
+    ack-prow = {
+      path             = "flux/ack/charts/ack-prow"
+      target_namespace = "ack-system"
+      values           = ["accountId", "prowDomain", "stackName"]
+    }
+    ack-flux = {
+      path             = "flux/ack/charts/ack-flux"
+      target_namespace = "ack-system"
+      values           = ["ghcrPtcSecretArn"]
+    }
+    ack-build-infra = {
+      path             = "flux/ack/charts/ack-build-infra"
+      target_namespace = "ack-system"
+      values           = ["accountId", "region", "stackName"]
+    }
+    prow-build-cluster-kubeconfig = {
+      # flux-system, not ack-system: kustomize-controller reads this ConfigMap via
+      # kubeConfig.configMapRef, so it must sit where the controller looks. Phase 5
+      # removes it along with Flux.
+      path             = "flux/prow/charts/prow-build-cluster-kubeconfig"
+      target_namespace = "flux-system"
+      values           = ["accountId", "region", "stackName"]
+    }
+    prow-build-cluster-connection = {
+      path             = "flux/prow/charts/prow-build-cluster-connection"
+      target_namespace = "flux-system"
+      values           = ["prowImagesRepoUri", "stackName"]
+    }
+    prow-mirror = {
+      path             = "flux/prow/charts/prow-mirror"
+      target_namespace = "test-pods"
+      # prowVersion, toolsVersion and prowPatchRevision are deliberately absent:
+      # they are static git-authored strings and now live as defaults in the chart's
+      # values.yaml, not as per-environment parameters Terraform supplies.
+      values = ["accountId", "region"]
+    }
+  }
+}
+
+resource "kubernetes_manifest" "argocd_application" {
+  for_each = local.argocd_applications
+
+  manifest = {
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "Application"
+    metadata = {
+      name      = each.key
+      namespace = "argocd"
+    }
+    spec = {
+      project = kubernetes_manifest.argocd_project.manifest.metadata.name
+
+      source = {
+        repoURL        = "https://github.com/${var.test_infra_org}/${var.test_infra_repo}"
+        targetRevision = var.test_infra_branch
+        path           = each.value.path
+
+        helm = {
+          # Parameters, not a values file: these are per-environment and Terraform is
+          # the only thing that knows them.
+          parameters = [
+            for k in each.value.values : {
+              name  = k
+              value = local.argocd_chart_values[k]
+            }
+          ]
+        }
+      }
+
+      destination = {
+        # The capability registers the cluster by ARN, not by URL. A URL here would
+        # not match the AppProject destination and the Application would be rejected.
+        server    = aws_eks_cluster.this.arn
+        namespace = each.value.target_namespace
+      }
+
+      syncPolicy = {
+        # No `automated` block: manual sync. Nothing is applied until a human or a
+        # later change enables it. See the header for why.
+        syncOptions = [
+          "ServerSideApply=true",
+          # Namespaces are owned by prow-namespaces.yaml and by Terraform, never by a
+          # chart, so Argo CD must not create them either.
+          "CreateNamespace=false",
+        ]
+      }
+    }
+  }
+
+  # The Applications describe paths that Flux is still reconciling. Creating them is
+  # inert while sync is manual, but they must not be created before the AppProject
+  # that authorises the repo and destination.
+  depends_on = [kubernetes_manifest.argocd_project]
+}
