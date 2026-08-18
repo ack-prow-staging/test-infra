@@ -137,6 +137,19 @@ locals {
       path             = "flux/prow/charts/prow-build-cluster-connection"
       target_namespace = "flux-system"
       values           = ["prowImagesRepoUri", "stackName"]
+      automated        = true
+
+      # The only path with selfHeal on, and the difference is deliberate. Its Job is a
+      # Helm post-install/post-upgrade hook, which Argo CD maps to PostSync and runs
+      # whenever a sync has work to do - so making live drift a sync trigger is also what
+      # gives the Job a re-run trigger. Verified: deleting one Role and the Job caused
+      # Argo CD to restore the Role and re-run the hook, and the Job rebuilt
+      # build-cluster-kubeconfig byte-identically.
+      #
+      # Safe here in a way it is not on the ACK paths: this chart owns only in-cluster
+      # RBAC and a Job. There is no AWS resource behind any of it, so Argo CD reasserting
+      # desired state cannot fight ACK or overwrite someone mid-diagnosis of AWS state.
+      self_heal = true
     }
     prow-mirror = {
       path             = "flux/prow/charts/prow-mirror"
@@ -212,7 +225,7 @@ resource "kubernetes_manifest" "argocd_application" {
         lookup(each.value, "automated", false) ? {
           automated = {
             prune    = false
-            selfHeal = false
+            selfHeal = lookup(each.value, "self_heal", false)
           }
         } : {}
       )

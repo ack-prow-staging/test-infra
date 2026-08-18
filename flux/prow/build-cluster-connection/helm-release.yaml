@@ -13,10 +13,38 @@ metadata:
   name: prow-build-cluster-connection
   namespace: flux-system
 spec:
-  # SUSPENDED for a corrected hook test. The earlier conclusion was drawn from a sync
-  # that had nothing to apply, which is not the case that matters: at stack bootstrap
-  # this path runs before Prow exists, so the question is whether Argo CD runs the hook
-  # when a sync has REAL work, not whether it runs one on a no-op.
+  # SUSPENDED: this path is cut over to Argo CD (Application of the same name, in
+  # bootstrap/argocd-applications.tf). helm-controller stops reconciling, so the objects
+  # are managed solely by Argo CD, while the enclosing Kustomization stays active and
+  # keeps enforcing this field.
+  #
+  # It has to be declared here rather than applied with kubectl. The root test-infra
+  # Kustomization re-applies these specs, so an imperative suspend is silently reverted
+  # on the next reconcile and both reconcilers end up managing the same objects.
+  # Suspending the Kustomization instead does not work either: the HelmRelease is applied
+  # BY that Kustomization, so a suspended one can never deliver a suspend to its own
+  # HelmRelease.
+  #
+  # This path survives the migration, unlike prow-build-cluster-kubeconfig which Phase 5
+  # deletes: the Job discovers the build cluster endpoint and CA from the build-cluster
+  # Cluster CR status and writes the build-cluster-kubeconfig ConfigMap that crier, deck,
+  # sinker and prow-controller-manager mount (D16).
+  #
+  # ARGO CD DOES RUN THE HOOK. An earlier attempt concluded otherwise, from syncs that
+  # had nothing to apply - which is not the case that matters. Argo CD skips hooks on a
+  # no-op sync and runs them when a sync has work, which is the bootstrap case: this path
+  # runs before Prow exists, since prow-charts dependsOn it. Verified by deleting one Role
+  # and the Job: Argo CD restored the Role, re-ran the PostSync hook, and the Job rebuilt
+  # build-cluster-kubeconfig byte-identically.
+  #
+  # Its Application is the only one with selfHeal on, because live drift is what gives the
+  # Job a re-run trigger, and this chart owns only RBAC and a Job with no AWS resource
+  # behind it. See the note there.
+  #
+  # The seven RBAC objects are the tracked set and span flux-system, ack-system and prow -
+  # the Job reads the CR in one namespace and writes the ConfigMap in another - so the
+  # Application's destination namespace is only a default. Applying them needs
+  # flux/argocd/namespaced-rbac.yaml, which must stay in place.
   suspend: true
   interval: 60m
   targetNamespace: flux-system
