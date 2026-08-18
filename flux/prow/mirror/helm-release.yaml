@@ -24,17 +24,11 @@ spec:
   install:
     createNamespace: false
   upgrade:
-    # force: true here, unlike every ack release.
-    #
-    # A Job's spec.template is immutable, so changing the mirrored image tags
-    # cannot be applied in place - the Job has to be deleted and recreated. The
-    # Kustomization this replaces already ran with force: true for exactly that
-    # reason, so this preserves existing behaviour rather than introducing it.
-    #
-    # It is safe here only because this chart contains nothing but the Job: there
-    # is no AWS resource behind it, and the ECR repositories it writes into are
-    # owned by the ack-prow chart, which keeps force: false.
-    force: true
+    # The Job is a Helm hook with hook-delete-policy: before-hook-creation,
+    # which deletes and recreates it. force is not the mechanism and would not
+    # work anyway: Helm force is a replace, and the API server still rejects a
+    # changed Job spec.template as immutable.
+    force: false
   valuesFrom:
   - kind: ConfigMap
     name: self-managed-vars

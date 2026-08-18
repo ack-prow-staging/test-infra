@@ -5,9 +5,13 @@
 # build-cluster-connection ConfigMap, which prow-charts substitutes into the
 # four components' build-cluster kubeconfig (server / certificate-authority-data).
 #
-# Least privilege: read the one Cluster CR in ack-system, write the one ConfigMap
-# in flux-system. No AWS/IAM credentials needed — the endpoint + CA live in the
-# CR status (ACK keeps them synced), so this is pure in-cluster RBAC.
+# It also assembles the finished build-cluster-kubeconfig ConfigMap in the prow
+# namespace, which the four components mount directly. That removes the render-time
+# substitution step, which Argo CD cannot perform.
+#
+# Least privilege: read the one Cluster CR in ack-system, write one ConfigMap in
+# flux-system and one in prow. No AWS/IAM credentials needed — the endpoint + CA
+# live in the CR status (ACK keeps them synced), so this is pure in-cluster RBAC.
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -60,6 +64,32 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: build-cluster-connection-write
+subjects:
+- kind: ServiceAccount
+  name: build-cluster-connection
+  namespace: flux-system
+---
+# Write the assembled kubeconfig ConfigMap that crier, deck, sinker and
+# prow-controller-manager mount. Scoped to configmaps in prow only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: build-cluster-connection-kubeconfig
+  namespace: prow
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: build-cluster-connection-kubeconfig
+  namespace: prow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: build-cluster-connection-kubeconfig
 subjects:
 - kind: ServiceAccount
   name: build-cluster-connection

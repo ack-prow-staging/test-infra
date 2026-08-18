@@ -27,12 +27,17 @@ spec:
   install:
     createNamespace: false
   upgrade:
-    # force: true for the same reason as prow-mirror: a Job's spec.template is
-    # immutable, and the Kustomization this replaces already ran with force: true.
-    # The chart holds only the Job and its RBAC, nothing AWS-backed.
-    force: true
+    # The Job is a Helm hook with hook-delete-policy: before-hook-creation,
+    # which deletes and recreates it. force is not the mechanism and would not
+    # work anyway: Helm force is a replace, and the API server still rejects a
+    # changed Job spec.template as immutable.
+    force: false
   valuesFrom:
   - kind: ConfigMap
     name: self-managed-vars
     valuesKey: PROW_IMAGES_REPO_URI
     targetPath: prowImagesRepoUri
+  - kind: ConfigMap
+    name: self-managed-vars
+    valuesKey: STACK_NAME
+    targetPath: stackName
