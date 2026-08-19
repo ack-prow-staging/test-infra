@@ -11,15 +11,13 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 
 | | |
 |---|---|
-| Kustomizations / HelmReleases Ready | 24/24, 16/16 (was 26 and 17 before the `prometheus` removal) |
-| Branch state | **deployed to staging.** `feat/argocd-migration-clean` @ `398aa32` is pushed, Flux has applied it, and `terraform apply` has run (targeted at the Applications and the access-policy association) |
-| Argo CD Applications | **20 live**: 12 Synced/Healthy and cut over, 8 OutOfSync on manual sync awaiting cutover. 19 are Terraform-declared and hub-targeted; the 20th, `prow-build-cluster-resources`, was composed by the connection chart and applied by its Job at runtime, never by Terraform (D13) — confirmed live, with its destination set to the build cluster ARN and **no rejection condition** |
-| Cut over | **12** paths, all `automated`, prune off everywhere |
-| Wired, not live | **8** — `prow-config`, `prow-data-plane`, `prow-jobs`, `prow-plugins`, `prow-agent-workflows`, `prow-build-cluster-resources`, `prow-crds`, `secrets`. All verified against live objects; awaiting push, apply and cutover |
-| Deleted, not migrated | **2** — `prometheus-dashboards` and its recording rules (unmaintained since 2021), and `prometheus` itself: `kube-prometheus-stack` had no reachable Grafana, alerts routed to `"null"`, and migrating it would have cost Argo CD cluster-admin |
-| ACK CRs | 64, all Argo CD-tracked, 0 deleting |
-| Still on Flux, not started | **none.** Every path is cut over, wired, or deleted. What remains is **eight cutovers**, then Flux removal |
-| Left behind by the `prometheus` teardown | an empty `prometheus` namespace and **10 orphaned `monitoring.coreos.com` CRDs**. Helm never deletes CRDs installed from a chart's `crds/` directory, and helm-controller does not delete a namespace it created. Both inert, no CRs remain, safe to delete by hand |
+| Kustomizations / HelmReleases | 25 Kustomizations (6 suspended), 16 HelmReleases (14 suspended). Every unsuspended one is Ready. The suspended `prow-build-cluster-resources` reads `Ready=False / DependencyNotReady` — a condition frozen at the moment of suspension, not a live fault; suspension stops reconciliation, it does not clear status |
+| Argo CD Applications | **20, all Synced/Healthy, all `automated`.** 19 Terraform-declared and hub-targeted; the 20th, `prow-build-cluster-resources`, composed by the connection chart and applied by its Job at runtime (D13) |
+| Cut over | **all 20 paths.** The migration is done on staging; every path is Argo CD-reconciled |
+| Deleted, not migrated | **2** — the Prow Grafana dashboards with their recording rules (unmaintained since 2021), and `kube-prometheus-stack` itself (no reachable Grafana, alerts routed to `"null"`, and migrating it would have cost Argo CD cluster-admin) |
+| uid preservation | **78 of 79 objects adopted in place.** The one exception is the `job-config-substitutor` Job, recreated by design via `Force=true,Replace=true` past its immutable `spec.template` |
+| Branch state | `feat/argocd-migration-clean` deployed to staging and cut over. Terraform applied targeted at the Applications and the access-policy association |
+| Left behind by the `prometheus` teardown | an empty `prometheus` namespace and 10 orphaned `monitoring.coreos.com` CRDs. Helm never deletes CRDs installed from a chart's `crds/` directory. Both inert, no CRs remain |
 | Clusters registered | 2 — hub, plus the build cluster as a spoke |
 
 `Synced` was never progress on its own. An Application whose objects are all Helm hooks has
@@ -162,19 +160,61 @@ it manages. Do not add `ignoreDifferences` for them — exceptions were tried an
 Serialized-JSON fields (`inlinePolicies`, policy documents) cannot be compared as strings at
 all; parse them. They also rewrite `generation` harmlessly on sync.
 
+## What the cutover phase taught
+
+Four things cost real time, none of which was visible from reading. They are here because the same
+traps apply to any later path, and to prod.
+
+**A hand-requested sync does not honour the Application's own `syncOptions`.** `prow-crds` failed
+identically under a manually patched `operation`, under `automated`, and with `Replace=true` added —
+always falling back to a *client-side* patch, which busts the 262144-byte annotation limit on a
+667 KB CRD. Proven from outside Argo CD: `kubectl apply --dry-run=server` fails with exactly that
+error while `kubectl apply --server-side --dry-run=server` succeeds. The fix was a **per-resource**
+`argocd.argoproj.io/sync-options: ServerSideApply=true` annotation on the manifest itself, which
+travels with the object rather than depending on the Application.
+
+**`automated` does not retry a failed sync for the same revision.** A path that fails once sits
+there looking stuck, with a stale `operationState` that reads like a live failure. A hard refresh
+(`argocd.argoproj.io/refresh=hard`) is what triggers a fresh attempt. Distinguish a new attempt from
+the old one by `status.operationState.startedAt`, not by the phase.
+
+**An in-flight operation is pinned to the revision it started on.** The connection Job OOMed, which
+left its PostSync hook in `Running`; Argo CD then kept recreating the *old* Job spec from the pinned
+revision, so a fix pushed afterwards was never used — deleting the Job just produced another copy of
+the old one. The operation has to be **terminated** (`status.operationState.phase: Terminating`)
+before a new revision is picked up. That cost several cycles and looked like the fix not working.
+
+**A stuck PostSync hook presents as a healthy Application.** The connection Application reported
+`Synced` throughout, while its hook Job was being OOMKilled repeatedly. The Job's steps are `kubectl`
+pipelines — `kubectl create … | kubectl label --local | kubectl apply -f -` runs three Go binaries
+concurrently — and peak usage is concurrent, not sequential, so 128Mi could not clear five such
+steps. Raised to 512Mi.
+
+Also worth carrying forward: the RBAC gaps were closed by **binding the built-in `admin` ClusterRole
+in the four namespaces `AmazonEKSAdminPolicy` already covers**, rather than by adding rules one
+failed sync at a time. That grants no new effective privilege and ends the churn for namespaced
+Roles; only cluster-scoped grants and custom resource types still need explicit rules, because
+`admin` does not aggregate CRs.
+
 ## What is left
 
-This table was previously scoped to the paths being converted, which made it read as though
-Flux removal were one step away. It is not. Measured against the live cluster — 26
-Kustomizations and 17 HelmReleases — twelve paths are cut over, six are converted or wired and
-waiting, and **three have not been started**.
+Every path on staging is cut over, so what remains is Phase 5 plus the other two environments.
+Nothing below is blocked on analysis; each item is work.
 
-A correction worth keeping, because it was mine: an earlier version of this table said the
-token-free paths were "blocked on nothing but an Application each". That held for two of the
-four. `secrets` and `prometheus` each carried a distinct problem that had nothing to do with
-substitution — a cluster-wide RBAC grant, and a chart whose own ClusterRoles would have cost
-cluster-admin. Zero tokens means Argo CD can *render* a path; it does not mean Argo CD is allowed to
-apply it, or that the path is worth keeping.
+| item | note |
+|---|---|
+| **Flux removal** | the point of all this. `flux/flux`, `flux/prow/version`, `flux/prow/build-cluster-kubeconfig`, the root `test-infra` Kustomization, `self-managed-vars`, and the now-redundant raw manifests under `flux/prow/build-cluster-resources/`. Also the six suspended Kustomizations and fourteen suspended HelmReleases, which exist only as reversal switches — deleting them is what makes the cutover irreversible, so it goes last |
+| `flux/argocd/` needs a new owner | it must survive Flux, because Argo CD cannot apply the objects that authorise Argo CD. Terraform is the obvious candidate; it already owns the access entry and the group |
+| dev and prod | this is staging only. The same branch drives all three, so each needs its own `terraform apply` and its own cutover, and prod deserves more care than the eight syncs took here |
+| the `secrets` grant's exit condition | narrow the CSI driver's ClusterRole to namespaced Roles, then delete the cluster-wide secrets rule outright. Written up beside the rule |
+| `prometheus` teardown remnants | an empty `prometheus` namespace and 10 orphaned `monitoring.coreos.com` CRDs. Both inert, no CRs remain |
+| `periodics_enabled` | declared in no variable and plumbed nowhere; `jobs_config.yaml` commits `true` for every environment. Found while converting `prow-jobs`, unrelated to the migration |
+
+## How each path was converted
+
+The rest of this document is the record of the conversion, one path at a time. It is kept
+because dev and prod still have to go through it, and because most of these sections exist to
+stop a wrong conclusion being re-derived. Read it as history, not as a plan.
 
 ### `prow-charts` splits unevenly, and `prow-config` is not a value-mapping job
 
@@ -189,7 +229,7 @@ and all ten objects (five Roles, five RoleBindings in `test-pods`) match live co
 change is inert for stages still on Flux, which keep passing the same values explicitly. The
 Application needs no `values`, and therefore no `helm` block.
 
-**`prow-config`: the chart half is done, the value-mapping half is not.** Its 25 token
+**`prow-config` was the largest path, and both halves are done.** Its 25 token
 occurrences were never 25 independent values:
 
 | token | count | what it is |
@@ -433,23 +473,12 @@ without the rules: 124 objects instead of 125, and no `prow` PrometheusRule.
 Grafana itself stays. Its sidecar picks up 29 dashboard ConfigMaps and 28 come from the chart; only
 the one was ours.
 
-| item | blocker |
-|---|---|
-| the four converted paths | push, `terraform apply`, then cut over. No code left to write; see the two sections below for their specifics |
-| ~~`prow-charts`~~ → ~~`prow-config`~~, ~~`prow-data-plane`~~ | **done.** The data-plane half was free; `prow-config` needed a chart change plus 12 parameters and no `values` block. See below |
-| ~~`prow-crds`~~ | **done.** Genuinely just an Application — see below |
-| ~~`prometheus-dashboards`~~ | **deleted, not migrated.** Unmaintained since 2021 and nothing referenced its metrics — see below |
-| ~~`secrets`~~ | **done**, and it cost the widest grant in the migration. Take the exit condition — see below |
-| ~~`prometheus`~~ | **deleted, not migrated.** Nothing consumed it and migrating it would have cost Argo CD cluster-admin — see below |
-| Phase 5 deletions | `flux/flux` (Flux itself, 5 tokens), `flux/prow/version`, `flux/prow/build-cluster-kubeconfig`, the root `test-infra` Kustomization, `self-managed-vars`. `flux/argocd/` is the exception: it must survive and needs a new owner, since Argo CD cannot apply the objects that authorise Argo CD |
-| `prow-build-cluster-resources` | chart written and Application declared; **needs push, apply and cutover**, none of which has happened. See below |
+### `prow-build-cluster-resources`: the only path that is not hub-targeted
 
-### Next task in detail: `prow-build-cluster-resources`
-
-The chart exists (`flux/prow/charts/prow-build-cluster-resources`, 13 objects) and its
-Application is composed by `prow-build-cluster-connection`'s
-`templates/application.yaml` and applied by that chart's Job. **Nothing is live.** Argo CD
-reads git, so the branch has to be pushed before either chart renders the new content.
+The chart is `flux/prow/charts/prow-build-cluster-resources` (13 objects) and its Application is
+composed by `prow-build-cluster-connection`'s `templates/application.yaml` and applied by that
+chart's Job. Argo CD reads git, so the branch has to be pushed before either chart renders the new
+content — which is why this path cannot be tested by a local apply.
 
 Note what applying it does *not* need: no `terraform apply` creates this Application.
 Terraform's only change here is three more parameters and a `values` string on the
@@ -493,7 +522,7 @@ What the conversion settled, so it is not re-derived:
   sees in-cluster RBAC, and there the capability holds cluster-admin
   (`argocd-build-cluster-access`), so it can apply the four Roles and RoleBindings directly.
 
-Remaining steps, in order:
+The order it ran in, which dev and prod need too:
 
 1. Push the branch. Both charts are read from git, so nothing before this has any effect.
 2. `terraform apply` with the branch override from *Applying Terraform during the
@@ -588,7 +617,7 @@ Instead: **the chart lives in the generated file's own directory** and reads it 
 `prow-agent-workflows` renders one ConfigMap, byte-identical to the live
 `agent-workflow-config`, same single `workflows.yaml` key.
 
-#### `prow-plugins` is blocked on an RBAC decision, not on rendering
+#### `prow-plugins` needed an RBAC decision, not a rendering fix
 
 The rendering half is easy and follows the pattern exactly: chart root
 `prow/plugins/deployments/`, three tokens (`PROW_IMAGES_REPO_URI`, `STACK_NAME`,
