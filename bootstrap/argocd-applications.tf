@@ -28,12 +28,14 @@
 #   ServerSideApply=true. Live objects carry field managers from kustomize-controller
 #   and from Helm. SSA transfers ownership field by field instead of fighting them.
 #
-# The four generated prow paths (prow-plugins, prow-jobs, prow-agent-workflows,
-# prow-build-cluster-resources) are deliberately absent. They still contain ${TOKEN}
-# placeholders and Argo CD has no substitution, so an Application would write
-# image: ${PROW_IMAGES_REPO_URI}:... into a Deployment and GITHUB_ORG:
-# ${TEST_INFRA_ORG} into the agent workflow config. They stay on Flux until their
-# per-environment kustomize overlays exist.
+# The three generated prow paths (prow-plugins, prow-jobs, prow-agent-workflows) are
+# deliberately absent. They still contain ${TOKEN} placeholders and Argo CD has no
+# substitution, so an Application would write image: ${PROW_IMAGES_REPO_URI}:... into
+# a Deployment and GITHUB_ORG: ${TEST_INFRA_ORG} into the agent workflow config. They
+# stay on Flux until their generator emits Helm placeholders instead.
+#
+# prow-build-cluster-resources was the fourth until its chart landed. It is here now, and
+# it is the only Application whose destination is the build cluster rather than the hub.
 #
 # prow-build-cluster-kubeconfig is absent for a different reason: it does not outlive
 # Flux, so there is nothing to migrate. The build-cluster-flux-kubeconfig ConfigMap
@@ -64,6 +66,35 @@ locals {
     ghcrPtcSecretArn  = data.aws_secretsmanager_secret.ghcr_ptc.arn
     prowImagesRepoUri = local.prow_images_repo_uri
   }
+
+  # The build cluster's ARN, CONSTRUCTED rather than read.
+  #
+  # This is the one Terraform reference keyed to the build cluster, and it is a narrow,
+  # deliberate exception to D13 - which otherwise forbids exactly this. D13's two failure
+  # modes are what make it an exception rather than a violation:
+  #
+  #   Created before the cluster exists. An Application naming an unregistered destination
+  #   is REJECTED: it reports a condition and applies nothing. Once the
+  #   prow-build-cluster-connection Job registers the spoke and appends the AppProject
+  #   destination, it becomes valid on its own. Inert, then correct - unlike a registration
+  #   Secret, which would advertise a cluster Argo CD cannot reach.
+  #
+  #   Removed while still referenced. Deleting an Application only cascades to its objects
+  #   when the argocd resources-finalizer is present, and Terraform does not set it, so a
+  #   destroy orphans the 13 build-cluster objects rather than deleting them - the same
+  #   semantics cleanup-argocd-resources.sh gets from --cascade=orphan.
+  #
+  # Constructed from the same locals Terraform already owns, so there is no read of ACK
+  # state and no plan-time dependency on the CR. Verified against the live CR status:
+  #   arn:aws:eks:us-west-2:086987147623:cluster/ack-test-infra-staging-build-cluster
+  # The Job still reads the ARN from the CR status for the registration Secret and the
+  # AppProject destination, because there the read doubles as proof the cluster exists.
+  #
+  # The alternative - having the Job create this Application too - was rejected: repoURL,
+  # targetRevision and the chart values are Terraform's, so the Job would need them
+  # threaded through its own chart, and Application ownership would be split across two
+  # owners for one path.
+  argocd_build_cluster_arn = "arn:${local.partition}:eks:${var.region}:${local.account_id}:cluster/${local.stack_name}-build-cluster"
 
   # One entry per converted chart path. `values` lists which parameters that chart
   # requires; each is declared `required` in the chart, so a missing entry fails at
@@ -151,6 +182,57 @@ locals {
       # desired state cannot fight ACK or overwrite someone mid-diagnosis of AWS state.
       self_heal = true
     }
+    prow-build-cluster-resources = {
+      # The only Application targeting the SPOKE, and the only one whose objects are not on
+      # the hub at all: a Namespace, a ServiceAccount, four Roles, four RoleBindings, the
+      # shared test-config ConfigMap, a NodeClass and a NodePool, applied INSIDE the build
+      # cluster. ACK creates that cluster but cannot write Kubernetes objects into it.
+      #
+      # Argo CD can apply the Role and RoleBinding objects here without the grantor rules
+      # that flux/argocd/namespaced-rbac.yaml provides on the hub, because escalation
+      # prevention only sees in-cluster RBAC and on this cluster the capability holds
+      # cluster-admin (argocd-build-cluster-access). That grant is what this path needs it
+      # for.
+      path             = "flux/prow/charts/prow-build-cluster-resources"
+      target_namespace = "test-pods"
+
+      destination_server = local.argocd_build_cluster_arn
+
+      values = ["stackName"]
+
+      # test_config.yaml's CONTENT, not a path, and the reason this path converted last.
+      # The directory read the file through a `../../../` configMapGenerator reference,
+      # which only kustomize-controller permits (it builds with load restrictions
+      # disabled). The managed capability exposes no equivalent, kustomize refuses to read
+      # above the kustomization root, and Helm's .Files.Get is chart-rooted.
+      #
+      # Relocating the file is not an option: prow/jobs/ and this path share only the repo
+      # root, so "relocating" means duplicating - the drift the shared reference prevents.
+      # Injecting the content keeps one source of truth for both clusters.
+      #
+      # values, NOT parameters. Parameters are passed as --set, which reads `.` and `,` as
+      # path and list separators, and this file contains both. Not valuesObject either:
+      # that field is x-kubernetes-preserve-unknown-fields, so kubernetes_manifest types it
+      # dynamically, while values is a plain string the provider handles predictably. Argo
+      # CD writes it to a values file, so multi-line content passes through untouched.
+      #
+      # file() at 226 bytes, precedent at images.tf:63. Verified: the rendered ConfigMap is
+      # byte-identical to the live one, same single test_config.yaml key. The name must
+      # stay `test-config` - the preset-test-config preset mounts it by name, which is what
+      # disableNameSuffixHash protected.
+      values_yaml = yamlencode({
+        testConfig = file("${path.module}/../prow/jobs/test_config.yaml")
+      })
+
+      # NOT cut over. automated stays off until the Application has synced once and the 13
+      # objects are confirmed to have held their uid, per the procedure in
+      # docs/argocd-migration.md. Cutting over also means removing the raw manifests from
+      # flux/prow/build-cluster-resources/ - this path has no HelmRelease to suspend, and
+      # cannot have a working one: the build-cluster PodIdentityAssociation binds
+      # serviceAccount: kustomize-controller, so helm-controller has no identity on the
+      # spoke and could never render a release there. kustomize-controller keeps applying
+      # the raw manifests until then, so the objects always have exactly one reconciler.
+    }
     prow-mirror = {
       path             = "flux/prow/charts/prow-mirror"
       target_namespace = "test-pods"
@@ -181,22 +263,37 @@ resource "kubernetes_manifest" "argocd_application" {
         targetRevision = var.test_infra_branch
         path           = each.value.path
 
-        helm = {
-          # Parameters, not a values file: these are per-environment and Terraform is
-          # the only thing that knows them.
-          parameters = [
-            for k in each.value.values : {
-              name  = k
-              value = local.argocd_chart_values[k]
-            }
-          ]
-        }
+        helm = merge(
+          {
+            # Parameters, not a values file: these are per-environment and Terraform is
+            # the only thing that knows them.
+            parameters = [
+              for k in lookup(each.value, "values", []) : {
+                name  = k
+                value = local.argocd_chart_values[k]
+              }
+            ]
+          },
+          # values carries anything --set cannot express - currently only the test_config
+          # content for prow-build-cluster-resources, whose `.` and `,` characters --set
+          # would read as path and list separators. Argo CD applies values first and
+          # parameters second, and the two never carry the same key, so they do not
+          # interact.
+          lookup(each.value, "values_yaml", null) != null ? {
+            values = each.value.values_yaml
+          } : {}
+        )
       }
 
       destination = {
-        # The capability registers the cluster by ARN, not by URL. A URL here would
-        # not match the AppProject destination and the Application would be rejected.
-        server    = aws_eks_cluster.this.arn
+        # The capability registers clusters by ARN, not by URL. A URL here would not match
+        # the AppProject destination and the Application would be rejected.
+        #
+        # Defaults to the hub. prow-build-cluster-resources overrides it with the build
+        # cluster's ARN - the one destination Terraform does not own the cluster behind, see
+        # argocd_build_cluster_arn above for why that is an exception to D13 rather than a
+        # breach of it.
+        server    = lookup(each.value, "destination_server", aws_eks_cluster.this.arn)
         namespace = each.value.target_namespace
       }
 
