@@ -7,6 +7,13 @@ Detailed rationale lives next to the code: each cut-over path's HelmRelease expl
 own suspension, `bootstrap/argocd-applications.tf` explains the Application shape, and
 `bootstrap/argocd-rbac.tf` explains the RBAC grant. This file is the map.
 
+**To migrate an environment, use `docs/argocd-migration-runbook.md`.** That is the executable
+sequence: which commits to merge in which stages, what to apply between them, the manual steps
+that no merge performs, and the gate that must pass before each next stage. This file explains
+why; the runbook says what to do. The single most important thing in it: **merge in stages, not
+wholesale** - landing the Flux suspensions at the same time as the charts leaves paths reconciled
+by neither reconciler.
+
 ## State
 
 | | |
