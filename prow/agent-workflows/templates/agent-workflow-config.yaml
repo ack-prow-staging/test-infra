@@ -20,6 +20,14 @@
 #
 # Terraform therefore supplies only the two scalars below.
 #
+# THIS IS THE FIRST CHART DIRECTORY IN THE REPO THAT ALSO HOLDS A kustomization.yaml, which
+# makes Argo CD's tool detection load-bearing. It resolves to Helm twice over: the
+# Application sets source.helm, which is explicit configuration and wins outright, and
+# failing that the implicit rule checks Chart.yaml BEFORE kustomization.yaml. So Argo CD
+# renders this chart and never the kustomization, while kustomize-controller reads only
+# kustomization.yaml and never this chart. Do not remove source.helm from the Application on
+# the grounds that its parameters look redundant.
+#
 # WHY THE GENERATED FILE STILL CARRIES ${TOKEN}. Nothing about the generator changes here,
 # deliberately. Those placeholders are how every stage gets per-environment values, and
 # stages still on Flux resolve them with postBuild from self-managed-vars. Emitting Helm

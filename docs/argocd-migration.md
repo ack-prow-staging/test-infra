@@ -309,9 +309,54 @@ Instead: **the chart lives in the generated file's own directory** and reads it 
 `prow-agent-workflows` renders one ConfigMap, byte-identical to the live
 `agent-workflow-config`, same single `workflows.yaml` key.
 
-`prow-plugins` should follow directly: chart in `prow/plugins/deployments/`, three tokens,
-all present as values. `prow-jobs` is the awkward one — its `templates/` holds 26 generator
-templates, and it has the two problems below.
+#### `prow-plugins` is blocked on an RBAC decision, not on rendering
+
+The rendering half is easy and follows the pattern exactly: chart root
+`prow/plugins/deployments/`, three tokens (`PROW_IMAGES_REPO_URI`, `STACK_NAME`,
+`ACCOUNT_ID`) all present in `argocd_chart_values`, and no `.helmignore` needed because the
+generator's templates live in `prow/plugins/templates/`, a different tree.
+
+The blocker is that `agent-plugin/rbac.yaml` contains a **ClusterRole and
+ClusterRoleBinding**, granting `prow.k8s.io/prowjobs` create/get/list/watch/update/patch,
+`pods` get/list/watch and `pods/log` get. Measured against the live cluster with
+`kubectl auth can-i --as-group=argocd-cluster-scoped`, which is exactly the view escalation
+prevention has (access policies are enforced by the EKS authorizer and are invisible to it):
+
+```
+create clusterroles                no      create prowjobs (all ns)   no
+create clusterrolebindings         no      patch  prowjobs (all ns)   no
+                                           list   pods     (all ns)   no
+                                           get    pods/log (all ns)   no
+```
+
+So two separate things are missing, the same pair that `argocd` namespace needed: the ability
+to create ClusterRoles at all, and holding what the created ClusterRole grants.
+`cluster-scoped-rbac.yaml` currently grants only storageclasses, ingressclasses, nodepools
+and nodeclasses.
+
+**This one is not a subset-restatement, and that is the decision.** Every previous grantor
+rule was defensible as "no access Argo CD lacked, expressed where the RBAC authorizer can see
+it" — `AmazonEKSAdminPolicy` already gave it those permissions, namespace-scoped. Holding
+prowjobs write and pod read *cluster-wide* is genuinely wider than Argo CD has today. Three
+options, in order of preference:
+
+1. **Narrow the plugin's RBAC to namespaced Roles** and keep the grantor namespaced too. The
+   evidence says this is achievable: the Deployment pins `PROW_JOB_NAMESPACE: "prow"` and all
+   48 live ProwJobs are in `prow`, so the ClusterRole is wider than the workload needs. Cost:
+   it changes `rbac.tpl`, so it is a generator change and a behavioural change to the
+   plugin's permissions — needs the plugin owner, and needs checking whether it reads pod logs
+   for jobs running on the build cluster.
+2. **Grant the two rule sets cluster-wide in `cluster-scoped-rbac.yaml`.** Mechanical, matches
+   the existing pattern, and widens Argo CD's effective access. Defensible only because
+   kustomize-controller already holds more than this and loses it in Phase 5.
+3. **Leave `prow-plugins` on Flux** and accept that Flux removal waits on it. Not really an
+   option, since Flux removal is the goal.
+
+Option 1 is right if the plugin genuinely only needs `prow`; option 2 if it does not.
+Answering that is the next step, and it is a question for whoever owns agent-plugin.
+
+`prow-jobs` is the last and most awkward: its `templates/` holds 26 generator templates, and
+it has the two problems below.
 
 Two things that will bite on `prow-jobs`:
 
