@@ -195,10 +195,13 @@ resource "kubernetes_manifest" "argocd_root" {
           "CreateNamespace=false",
         ]
 
-        automated = {
-          prune    = false
-          selfHeal = false
-        }
+        # An EMPTY object, not `{prune = false, selfHeal = false}`, and the difference is
+        # only about keeping the plan honest. Absent means false to Argo CD, and the API
+        # server drops both zero values on Terraform's write - so spelling them out leaves
+        # `prune: null -> false` in every future plan, forever, on a field nothing reads.
+        # The children can spell them out because argocd-controller's server-side apply
+        # keeps them; this object cannot. Presence of `automated` is what enables auto-sync.
+        automated = {}
       }
     }
   }

@@ -12,7 +12,8 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 | | |
 |---|---|
 | Kustomizations / HelmReleases | 24 Kustomizations (6 suspended), 16 HelmReleases (14 suspended). Every unsuspended one is Ready. The suspended `prow-build-cluster-resources` reads `Ready=False / DependencyNotReady` — a condition frozen at the moment of suspension, not a live fault; suspension stops reconciliation, it does not clear status |
-| Argo CD Applications | **20, all Synced/Healthy, all `automated`.** 19 Terraform-declared and hub-targeted; the 20th, `prow-build-cluster-resources`, composed by the connection chart and applied by its Job at runtime (D13) |
+| Argo CD Applications | **21, all Synced/Healthy, all `automated`.** 19 are rendered from git by `root-applications`, the one Application Terraform declares; the 21st, `prow-build-cluster-resources`, is composed by the connection chart and applied by its Job at runtime (D13) |
+| Who owns the Application definitions | **git**, in `argocd/applications/`. Terraform holds the root plus the 16 per-environment values it passes as one `helm.values` blob. Adding or changing a path is a commit, not a `terraform apply` |
 | Cut over | **all 20 paths.** The migration is done on staging; every path is Argo CD-reconciled |
 | Deleted, not migrated | **2** — the Prow Grafana dashboards with their recording rules (unmaintained since 2021), and `kube-prometheus-stack` itself (no reachable Grafana, alerts routed to `"null"`, and migrating it would have cost Argo CD cluster-admin) |
 | uid preservation | **78 of 79 objects adopted in place.** The one exception is the `job-config-substitutor` Job, recreated by design via `Force=true,Replace=true` past its immutable `spec.template` |
@@ -820,6 +821,105 @@ Also fixed while in the file: the `kubernetes` provider was never declared in
 `required_providers` and was being resolved implicitly, unpinned. It now carries a floor like
 the others. Six pre-existing files fail `terraform fmt -check` and were deliberately left
 alone — reformatting them would bury this change.
+
+### The Applications moved to git behind one root Application
+
+Terraform declared 19 Applications, one `kubernetes_manifest` each. It now declares one,
+`root-applications`, which renders the rest from `argocd/applications/`. The structure those
+19 carried - chart path, target namespace, which parameters each chart needs, sync behaviour -
+is all git-authored, so this is the `prow-mirror` rule applied one level above the charts. The
+day-to-day consequence is that adding or changing a path no longer needs an apply.
+
+**Terraform still supplies the values, and that does not change.** The 16 entries in
+`local.argocd_chart_values` are per-environment and Argo CD cannot read them at render time:
+it renders off-cluster, `valuesFrom` against a ConfigMap does not exist (argo-cd#12060),
+Helm's `lookup` returns empty, and there is no repo-server to attach a plugin to. What
+changed is that they travel **once, as one `helm.values` blob**, instead of as parameters on
+19 Applications.
+
+**That blob is also what makes the account id safe, and it is worth knowing why.** Parameters
+are `--set`, which reads `.` as a path separator and `,` as a list separator. `yamlencode`
+quotes every scalar, so `"086987147623"` stays a string. Written unquoted, Go's YAML parser
+reads it as a **float** - a leading zero with `8` and `9` in it is not valid octal, so it
+falls through to float rather than int - and `printf %s` then yields
+`%!s(float64=8.6987147623e+10)`, a syntactically valid image reference that fails at pull
+time rather than at render time. The chart guards every value with `kindIs "string"`, and the
+guard was confirmed by accident: a verification harness dumped the values with PyYAML, which
+does not quote, and the render failed with exactly that message. PyYAML reads it back as a
+string, so the harness looked correct and only Go disagreed.
+
+**Argo CD had no dependency ordering at all before this.** No `sync-wave` on any of the 19,
+while Flux carries 15 `dependsOn` edges. The migration never noticed, because paths were cut
+over one at a time into a cluster where the graph was already satisfied; on a fresh bootstrap
+it is not. Each child now carries a wave, derived from that graph by script rather than by
+eye - a node sits one deeper than its **deepest** dependency, so nothing can sync ahead of a
+transitive dependency it shares no direct edge with.
+
+| wave | applications |
+|---|---|
+| 0 | `ack-capability-role` |
+| 1 | `ack-capability` |
+| 2 | `ack-addons-roles`, `ack-build-infra`, `ack-cluster`, `ack-flux`, `ack-pod-identity-roles`, `ack-prow` |
+| 3 | `ack-addons`, `ack-pod-identities`, `prow-build-cluster-connection` |
+| 4 | `prow-agent-workflows`, `prow-crds`, `prow-mirror`, `secrets` |
+| 5 | `prow-config`, `prow-data-plane`, `prow-jobs`, `prow-plugins` |
+
+**Flux's graph was incomplete, and three edges had to be added.** Without them
+`prow-agent-workflows`, `prow-jobs` and `prow-plugins` landed in wave 0 - ahead of the ACK
+capability - because Flux declares no `dependsOn` for any of them. Both missing edges are
+real and both were verified rather than assumed:
+
+- **`ack-pod-identities` creates the `prow` and `test-pods` namespaces**
+  (`flux/ack/cluster/pod-identities/prow-namespaces.yaml`, confirmed by the
+  `kustomize.toolkit.fluxcd.io/name` label on both live namespaces). Every Application carries
+  `CreateNamespace=false`, so a path targeting either namespace **fails outright** before that
+  path has run. Applied to every path targeting those namespaces, which the existing edges
+  already covered for the rest.
+- **`prow-mirror` runs `Job/prow-mirror-images`**, which publishes into the repo
+  `prowImagesRepoUri` names. Added only where something actually pulls - checked per path from
+  the live image reference. `prow-agent-workflows` renders a ConfigMap that *names* a mirrored
+  image without pulling one, so it does not get this edge.
+
+Flux got away without all three because both conditions were already true by the time those
+paths were first applied. That is worth generalising: a dependency graph that has only ever
+run against a converged cluster has not been tested.
+
+**The handover was an adoption, not a recreate.** The 19 were removed from Terraform state
+with `terraform state rm` - which leaves the live objects untouched - and the root then adopted
+them under `ServerSideApply=true`. Confirmed safe *before* committing to it, with a
+server-side dry-run apply as `argocd-controller` against all 19: zero conflicts, because SSA
+only conflicts where two managers set **different** values and the render had already been
+verified equal to live field by field. Result: 19/19 uids held, `automated` preserved on every
+path, `source`/`destination`/`project` unchanged.
+
+Two things to know about the pattern's limits:
+
+- **Removing a path orphans its Application.** `prune` is false on the root, and Argo CD
+  cannot delete Applications anyway - `argocd-rbac.tf` grants get/create/update/patch and no
+  delete. Deleting the leftover is a manual step. That is the accepted cost; the alternative is
+  `prune: true` on the root, where a chart that renders empty for any reason deletes all 19
+  Application objects at once.
+- **`automated` on the root is written as `{}`, not `{prune: false, selfHeal: false}`.** Absent
+  means false, and the API server drops both zero values on Terraform's write, so spelling them
+  out leaves `prune: null -> false` in every future plan on a field nothing reads. The children
+  can spell them out, because `argocd-controller`'s server-side apply keeps them. Same class of
+  problem as the Kubernetes provider defaulting `subject.namespace` to `"default"`: a
+  permanently dirty plan costs more than the explicitness is worth.
+
+**What did not move, and cannot.** The AppProject (children reference it; a child cannot create
+the project that admits it), the hub registration Secret (nothing deploys until a cluster is
+registered), `argocd-rbac.tf` (Argo CD cannot apply what authorises Argo CD), and the root
+itself - an Application that renders itself is a loop with no seam, and the seam is the point.
+`prow-build-cluster-resources` stays out of the chart permanently: D13 puts anything keyed to
+the build cluster beyond Terraform's reach, and that now includes anything Terraform renders.
+
+**ApplicationSets were considered and not taken.** The CRD is present and AWS documents git
+generators for the managed capability, so it was available. Rejected for this repo: the
+multi-cluster and multi-environment fan-out they exist for does not apply (two clusters, one of
+which Terraform must not target; three environments with separate states), a directory
+generator cannot express per-path config that is not derivable from the path, and it would need
+`applicationsets` plus `delete` on applications - a wider grant than app-of-apps, which needed
+none. Worth revisiting only if path churn ever makes the manual-delete cost real.
 
 ## Traps
 
