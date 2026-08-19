@@ -10,6 +10,35 @@ metadata:
   name: prow-mirror
   namespace: flux-system
 spec:
+  # SUSPENDED: this path is cut over to Argo CD (Application of the same name, in
+  # bootstrap/argocd-applications.tf). helm-controller stops reconciling, so the objects
+  # are managed solely by Argo CD, while the enclosing Kustomization stays active and
+  # keeps enforcing this field.
+  #
+  # It has to be declared here rather than applied with kubectl. The root test-infra
+  # Kustomization re-applies these specs, so an imperative suspend is silently reverted
+  # on the next reconcile and both reconcilers end up managing the same objects.
+  # Suspending the Kustomization instead does not work either: the HelmRelease is applied
+  # BY that Kustomization, so a suspended one can never deliver a suspend to its own
+  # HelmRelease.
+  #
+  # This path could not be cut over until the chart gained a tracked object. Its only
+  # object was the mirror Job, a Helm post-install/post-upgrade hook, and Argo CD excludes
+  # hooks from the comparison - so there was nothing that could ever differ, the
+  # Application was permanently Synced, and no sync was ever triggered to run the hook.
+  # templates/version-configmap.yaml is that tracked object: bumping a Prow patch changes
+  # it, which is real drift, so Argo CD syncs and the PostSync hook mirrors the new
+  # versions. See the header there.
+  #
+  # It stays in the sync path rather than moving to a schedule because neither option
+  # works. It is not one-shot bootstrap work like null_resource.bootstrap_prow_images_job,
+  # which runs once - it must re-run on every Prow patch bump. And it cannot be a Prow
+  # periodic, because it mirrors the images Prow runs from: prow-charts dependsOn it, so
+  # Prow does not exist yet.
+  #
+  # selfHeal is off. The trigger that matters is a git version bump, which `automated`
+  # handles; live drift is not a reason to re-mirror.
+  suspend: true
   interval: 60m
   targetNamespace: test-pods
   chart:

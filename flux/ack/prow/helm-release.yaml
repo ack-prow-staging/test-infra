@@ -9,6 +9,24 @@ metadata:
   name: ack-prow
   namespace: flux-system
 spec:
+  # SUSPENDED: this path is cut over to Argo CD (Application of the same name, in
+  # bootstrap/argocd-applications.tf). helm-controller stops reconciling, so the
+  # objects are managed solely by Argo CD, while the enclosing Kustomization stays
+  # active and keeps enforcing this field.
+  #
+  # It has to be declared here rather than applied with kubectl. The root test-infra
+  # Kustomization re-applies these specs, so an imperative suspend is silently
+  # reverted on the next reconcile and both reconcilers end up managing the same
+  # objects. Suspending the Kustomization instead does not work either: the
+  # HelmRelease is applied BY that Kustomization, so a suspended one can never
+  # deliver a suspend to its own HelmRelease.
+  #
+  # This path fronts the two resources on the stack that cannot simply be rebuilt:
+  # hosted zone Z04700203MF3WI39PDK3X, whose nameservers are delegated, and the
+  # adopted role Nova-DO-NOT-DELETE, which predates this stack and is owned
+  # elsewhere. Both are verified by AWS-side identity after the sync, not just by
+  # Kubernetes uid.
+  suspend: true
   interval: 60m
   targetNamespace: ack-system
   chart:
