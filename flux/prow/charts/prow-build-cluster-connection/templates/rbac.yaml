@@ -118,6 +118,12 @@ rules:
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["get", "create", "update", "patch"]
+# Append the spoke to the AppProject's destinations. get and patch only: Terraform creates
+# and owns the AppProject, and the Job amends one field. Without the destination an
+# Application targeting the build cluster is rejected outright rather than failing at sync.
+- apiGroups: ["argoproj.io"]
+  resources: ["appprojects"]
+  verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

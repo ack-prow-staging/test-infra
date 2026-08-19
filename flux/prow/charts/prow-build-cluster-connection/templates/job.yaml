@@ -162,6 +162,30 @@ spec:
                 argocd.argoproj.io/secret-type=cluster \
             | kubectl apply -f -
           echo "build cluster registered as an Argo CD spoke."
+
+          # Authorise the spoke in the AppProject.
+          #
+          # Registration alone is not enough: an Application whose destination.server is
+          # not listed in its project's destinations is REJECTED outright, rather than
+          # failing at sync, which is a confusing way to discover the omission.
+          #
+          # Runtime, like the registration and for the same reason - a destination naming
+          # the build cluster is keyed to a cluster ACK owns, so Terraform must not hold
+          # it (D13). Terraform declares the hub destination and carries
+          # ignore_changes on the list so it does not revert this.
+          #
+          # Idempotent because this hook runs on every sync: the destination is appended
+          # only when absent. A blind `add` would grow the list without bound.
+          PROJECT="test-infra"
+          if kubectl -n argocd get appproject "$PROJECT" \
+               -o jsonpath='{.spec.destinations[*].server}' | grep -qF "$ARN"; then
+            echo "AppProject $PROJECT already authorises the build cluster."
+          else
+            echo "Adding build cluster to AppProject $PROJECT destinations..."
+            kubectl -n argocd patch appproject "$PROJECT" --type=json \
+              -p "[{\"op\":\"add\",\"path\":\"/spec/destinations/-\",\"value\":{\"server\":\"${ARN}\",\"namespace\":\"*\"}}]"
+            echo "AppProject $PROJECT updated."
+          fi
         resources:
           requests:
             cpu: "50m"

@@ -150,6 +150,17 @@ resource "kubernetes_manifest" "argocd_project" {
       # Hub only. The build cluster is added as a destination in Phase 4, when it is
       # registered as a spoke - not before. A destination for an unregistered cluster
       # would be misleading.
+      # HUB ONLY. Spoke destinations are added at runtime, not here.
+      #
+      # A destination naming the build cluster is keyed to a cluster ACK owns, and
+      # Terraform must not hold anything keyed to it (D13) - the same reason the
+      # registration Secret is written by the prow-build-cluster-connection Job rather
+      # than by Terraform. Terraform authorises only the cluster it owns and bootstraps.
+      #
+      # The Job appends the spoke destination, which is why destinations is in
+      # ignore_changes below. Without that, the next terraform apply would silently
+      # revert the addition and Applications targeting the build cluster would start
+      # being rejected.
       destinations = [
         {
           server    = aws_eks_cluster.this.arn
@@ -167,6 +178,21 @@ resource "kubernetes_manifest" "argocd_project" {
   }
 
   depends_on = [awscc_eks_capability.argocd]
+
+  lifecycle {
+    # Spoke destinations are appended at runtime by the prow-build-cluster-connection
+    # Job, because a destination naming the build cluster is keyed to a cluster ACK owns
+    # and Terraform must not hold that (D13).
+    #
+    # Without this, every terraform apply would rewrite destinations back to the hub-only
+    # list. Nothing would error - the Job re-adds it on its next run - but in between,
+    # Applications targeting the build cluster are REJECTED rather than failing at sync,
+    # so the symptom appears at a distance from the apply that caused it.
+    #
+    # Scoped to destinations alone. sourceRepos, sourceNamespaces and
+    # clusterResourceWhitelist stay Terraform-managed and drift-corrected.
+    ignore_changes = [manifest.spec.destinations]
+  }
 }
 
 ################################################################################
