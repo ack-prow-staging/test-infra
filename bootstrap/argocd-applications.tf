@@ -200,6 +200,33 @@ locals {
       # desired state cannot fight ACK or overwrite someone mid-diagnosis of AWS state.
       self_heal = true
     }
+    prow-plugins = {
+      # Second of the generated paths. Same shape as prow-agent-workflows - chart in the
+      # generated files' own directory, read with .Files.Get, generator untouched, Terraform
+      # supplying only the scalars - so see that entry for the reasoning.
+      #
+      # What is different: this path's rbac.yaml carries a ClusterRole and ClusterRoleBinding,
+      # and Argo CD could neither create those nor hold cluster-wide what they grant, so
+      # escalation prevention would have refused them. That was a decision rather than a
+      # detail, and it was taken deliberately: flux/argocd/cluster-scoped-rbac.yaml now grants
+      # both, which is the one privilege EXPANSION in this migration rather than a restatement
+      # of access Argo CD already had. The alternative - narrowing the plugin's own ClusterRole
+      # to namespaced Roles - is better and still open, but it changes generated RBAC and the
+      # plugin's effective permissions, so it belongs to whoever owns agent-plugin. Read the
+      # block in that file before touching this.
+      #
+      # ORDERING: those grantor rules must be live before this Application first syncs. They
+      # are on the flux/argocd path, so Flux applies them; a sync attempted first fails on
+      # escalation with a message naming the ClusterRole rather than the missing rule.
+      path             = "prow/plugins/deployments"
+      target_namespace = "prow"
+      values           = ["prowImagesRepoUri", "stackName", "accountId"]
+
+      # NOT cut over. Manual sync until the first sync confirms all five objects kept their
+      # uid - the Deployment matters most, since its spec.selector is immutable and a
+      # recreate would drop the webhook server. prow-plugins' Kustomization has prune: false
+      # as of the earlier commit (D19-P1).
+    }
     prow-agent-workflows = {
       # First of the three generated paths to convert, and the smallest: one ConfigMap, two
       # tokens, no workload objects.

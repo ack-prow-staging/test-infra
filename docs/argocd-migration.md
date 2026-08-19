@@ -13,9 +13,9 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 |---|---|
 | Kustomizations / HelmReleases Ready | 27/27, 17/17 |
 | Argo CD Applications | 12 live, all Synced/Healthy — all 12 Terraform-declared and hub-targeted. A 13th (`prow-build-cluster-resources`, build-cluster-targeted) is composed by the connection chart and applied by its Job, and is **not live yet** — see below |
-| Cut over | **12 of 14** chart paths, all `automated`, prune off everywhere. The two uncut are `prow-build-cluster-resources` and `prow-agent-workflows`: both have charts and Applications written, neither is live |
+| Cut over | **12 of 15** chart paths, all `automated`, prune off everywhere. The three uncut — `prow-build-cluster-resources`, `prow-agent-workflows`, `prow-plugins` — all have charts and Applications written and verified against live; none is live |
 | ACK CRs | 64, all Argo CD-tracked, 0 deleting |
-| Still on Flux | `prow-build-cluster-resources`, `prow-agent-workflows` (both awaiting cutover), plus `prow-jobs` and `prow-plugins` |
+| Still on Flux | the three above, awaiting push/apply/cutover, plus `prow-jobs` which is not started |
 | Clusters registered | 2 — hub, plus the build cluster as a spoke |
 
 `Synced` was never progress on its own. An Application whose objects are all Helm hooks has
@@ -162,7 +162,7 @@ all; parse them. They also rewrite `generation` harmlessly on sync.
 
 | item | blocker |
 |---|---|
-| `prow-jobs`, `prow-plugins` | still `${TOKEN}`-bearing, so they block Flux removal. `prow-agent-workflows` is done and is the worked example — the generator does **not** change; see below |
+| `prow-jobs` | the last `${TOKEN}` path, and the only one not started. `prow-agent-workflows` and `prow-plugins` are converted and are the worked examples — the generator does **not** change; see below |
 | `prow-build-cluster-resources` | chart written and Application declared; **needs push, apply and cutover**, none of which has happened. See below |
 
 ### Next task in detail: `prow-build-cluster-resources`
@@ -334,26 +334,30 @@ to create ClusterRoles at all, and holding what the created ClusterRole grants.
 `cluster-scoped-rbac.yaml` currently grants only storageclasses, ingressclasses, nodepools
 and nodeclasses.
 
-**This one is not a subset-restatement, and that is the decision.** Every previous grantor
-rule was defensible as "no access Argo CD lacked, expressed where the RBAC authorizer can see
-it" — `AmazonEKSAdminPolicy` already gave it those permissions, namespace-scoped. Holding
-prowjobs write and pod read *cluster-wide* is genuinely wider than Argo CD has today. Three
-options, in order of preference:
+**This was not a subset-restatement, and that made it a decision rather than a detail.**
+Every previous grantor rule was defensible as "no access Argo CD lacked, expressed where the
+RBAC authorizer can see it" — `AmazonEKSAdminPolicy` already gave it those permissions,
+namespace-scoped. Holding prowjobs write and pod read *cluster-wide* is genuinely wider.
 
-1. **Narrow the plugin's RBAC to namespaced Roles** and keep the grantor namespaced too. The
-   evidence says this is achievable: the Deployment pins `PROW_JOB_NAMESPACE: "prow"` and all
-   48 live ProwJobs are in `prow`, so the ClusterRole is wider than the workload needs. Cost:
-   it changes `rbac.tpl`, so it is a generator change and a behavioural change to the
-   plugin's permissions — needs the plugin owner, and needs checking whether it reads pod logs
-   for jobs running on the build cluster.
-2. **Grant the two rule sets cluster-wide in `cluster-scoped-rbac.yaml`.** Mechanical, matches
-   the existing pattern, and widens Argo CD's effective access. Defensible only because
-   kustomize-controller already holds more than this and loses it in Phase 5.
-3. **Leave `prow-plugins` on Flux** and accept that Flux removal waits on it. Not really an
-   option, since Flux removal is the goal.
+**Decided: grant it, in `cluster-scoped-rbac.yaml`.** Two rules added — `clusterroles` and
+`clusterrolebindings` get/create/update/patch, and the plugin ClusterRole's own rules mirrored
+exactly. Verified the grantor now covers all 10 of that ClusterRole's (group, resource, verb)
+triples, that it can create ClusterRoles, and that it carries no `delete` and no `escalate`.
 
-Option 1 is right if the plugin genuinely only needs `prow`; option 2 if it does not.
-Answering that is the next step, and it is a question for whoever owns agent-plugin.
+What bounds it: kustomize-controller already holds strictly more and loses it in Phase 5, so
+the count of broadly-privileged principals does not go up.
+
+The better option is still open and is recorded in that file: **narrow the plugin's own
+ClusterRole to namespaced Roles**, which the evidence supports — its Deployment pins
+`PROW_JOB_NAMESPACE: "prow"` and all 48 live ProwJobs are in `prow`, so the ClusterRole is
+wider than the workload needs. It was not taken here because it changes generated RBAC and
+the plugin's effective permissions, which belongs to whoever owns agent-plugin. If it lands,
+shrink the grantor rules to match; they only need to remain a superset.
+
+**Ordering requirement.** The grantor rules must be live *before* `prow-plugins` first syncs.
+They sit on the `flux/argocd` path, so Flux applies them. A sync attempted first fails on
+escalation with a message naming the plugin's ClusterRole rather than the missing grantor
+rule, which points at the wrong file.
 
 `prow-jobs` is the last and most awkward: its `templates/` holds 26 generator templates, and
 it has the two problems below.

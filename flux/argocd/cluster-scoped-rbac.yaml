@@ -22,7 +22,9 @@
 # group works. An earlier decision record claimed in-cluster RBAC was impossible here
 # because the auto-created entry had no group - it does not, but a group can be added.
 #
-# If the ack-cluster chart stops carrying cluster-scoped objects, this should go too.
+# If the ack-cluster chart stops carrying cluster-scoped objects, the first four rules
+# should go too. The prow-plugins rules below have their own justification and their own
+# exit condition.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -50,6 +52,63 @@ rules:
 - apiGroups: ["eks.amazonaws.com"]
   resources: ["nodeclasses"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+################################################################################
+# For prow-plugins. THIS IS A DELIBERATE PRIVILEGE EXPANSION, decided rather than
+# drifted into, and it is the one grant in this migration that is NOT merely a
+# restatement of access Argo CD already holds.
+#
+# prow/plugins/deployments/agent-plugin/rbac.yaml carries a ClusterRole and
+# ClusterRoleBinding. Applying them needs the two separate permissions that the
+# argocd namespace also needed (see namespaced-rbac.yaml): the ability to create
+# ClusterRoles at all, and holding everything the created ClusterRole grants, or
+# escalation prevention refuses it. Measured before deciding, with
+# `kubectl auth can-i --as-group=argocd-cluster-scoped` - which is exactly the view
+# the RBAC authorizer has, since EKS access policies are enforced by the EKS
+# authorizer and are invisible to it:
+#
+#   create clusterroles         no    create prowjobs (all ns)   no
+#   create clusterrolebindings  no    patch  prowjobs (all ns)   no
+#                                     list   pods     (all ns)   no
+#                                     get    pods/log (all ns)   no
+#
+# Every other grantor rule in this repo could honestly be described as access Argo CD
+# already had, only expressed where the RBAC authorizer can see it -
+# AmazonEKSAdminPolicy grants it namespace-scoped admin over
+# {ack-system, prow, test-pods, prometheus, flux-system}. Cluster-wide prowjobs write
+# and pod read is WIDER than that, so that description does not apply here.
+#
+# The alternative was narrowing the plugin's own ClusterRole to namespaced Roles, which
+# the evidence supports - its Deployment pins PROW_JOB_NAMESPACE to prow and all live
+# ProwJobs are in prow, so the ClusterRole is wider than the workload needs. That was
+# considered and not taken: it changes the generated rbac.tpl and the plugin's effective
+# permissions, which belongs to whoever owns agent-plugin. Revisit it there, and shrink
+# these rules to match if it lands - they only need to remain a superset of what the
+# chart's ClusterRole grants.
+#
+# What bounds the expansion: kustomize-controller already holds strictly more than this
+# and loses it in Phase 5, so cluster-wide principals do not increase. No `delete` on any
+# of it, and no `escalate` - which was rejected here for the same reason it was in
+# namespaced-rbac.yaml, since it would let Argo CD create a Role conferring anything.
+################################################################################
+# 1. Create the objects themselves. Without this the failure is a plain "cannot create
+#    resource clusterroles at the cluster scope", not an escalation error, which is easy
+#    to mistake for one.
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["clusterroles", "clusterrolebindings"]
+  verbs: ["get", "create", "update", "patch"]
+# 2. Hold what the agent-plugin ClusterRole grants, so escalation prevention passes. These
+#    mirror it exactly; if that file gains a verb or resource, these need it too or the
+#    sync fails.
+- apiGroups: ["prow.k8s.io"]
+  resources: ["prowjobs"]
+  verbs: ["create", "get", "list", "watch", "update", "patch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
