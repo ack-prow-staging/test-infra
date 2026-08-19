@@ -170,8 +170,25 @@ rules:
 # This namespace is the one gap the associated access policies leave. AmazonEKSAdminPolicy
 # is scoped to {ack-system, prow, test-pods, prometheus, flux-system} and does not include
 # argocd; AmazonEKSArgoCDPolicy covers argocd but is the capability's own-operation grant,
-# which reads cluster Secrets rather than creating Roles that write them. So without this
-# rule Argo CD cannot apply the chart's Role and the registration never happens.
+# which reads cluster Secrets rather than managing RBAC.
+#
+# APPLYING A ROLE NEEDS TWO SEPARATE PERMISSIONS, and this namespace is the only one where
+# neither comes for free:
+#
+#   1. the ability to create roles and rolebindings at all, below. In the other three
+#      namespaces AmazonEKSAdminPolicy already grants this, which is why they need only the
+#      second rule. Without it the failure is a plain "cannot create resource roles in API
+#      group rbac.authorization.k8s.io in the namespace argocd" - not an escalation error,
+#      and easy to mistake for one.
+#
+#   2. holding whatever the created Role grants, so escalation prevention passes. That is
+#      the secrets rule below, matching build-cluster-connection-registrar.
+#
+# Granting roles/rolebindings write here does not let Argo CD widen its own access:
+# escalation prevention still caps any Role it creates at the permissions it already holds.
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "rolebindings"]
+  verbs: ["get", "create", "update", "patch"]
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["get", "create", "update", "patch"]
