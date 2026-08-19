@@ -11,11 +11,12 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 
 | | |
 |---|---|
-| Kustomizations / HelmReleases Ready | 27/27, 17/17 |
-| Argo CD Applications | 12 live, all Synced/Healthy — all 12 Terraform-declared and hub-targeted. A 13th (`prow-build-cluster-resources`, build-cluster-targeted) is composed by the connection chart and applied by its Job, and is **not live yet** — see below |
-| Cut over | **12 of 16** chart paths, all `automated`, prune off everywhere. The four uncut — `prow-build-cluster-resources`, `prow-agent-workflows`, `prow-plugins`, `prow-jobs` — all have charts and Applications written and verified against live; none is live |
+| Kustomizations / HelmReleases Ready | 26/26, 17/17 |
+| Argo CD Applications | **12 live**, all Synced/Healthy. **16 declared**: 15 by Terraform, all hub-targeted, plus `prow-build-cluster-resources` which is build-cluster-targeted and therefore composed by the connection chart and applied by its Job, never by Terraform (D13). Verified: all 15 render with the exact values Terraform supplies |
+| Cut over | **12** paths, all `automated`, prune off everywhere |
+| Converted, not live | **4** — `prow-build-cluster-resources`, `prow-agent-workflows`, `prow-plugins`, `prow-jobs`. Charts written, Applications declared, all verified against live objects; awaiting push, apply and cutover |
 | ACK CRs | 64, all Argo CD-tracked, 0 deleting |
-| Still on Flux | the four above, awaiting push, apply and cutover. Nothing else |
+| Still on Flux, not started | **6** paths — see *What is left*. `prow-charts` is the substantial one |
 | Clusters registered | 2 — hub, plus the build cluster as a spoke |
 
 `Synced` was never progress on its own. An Application whose objects are all Helm hooks has
@@ -160,9 +161,18 @@ all; parse them. They also rewrite `generation` harmlessly on sync.
 
 ## What is left
 
+This table was previously scoped to the paths being converted, which made it read as though
+Flux removal were one step away. It is not. Measured against the live cluster — 26
+Kustomizations and 17 HelmReleases — twelve paths are cut over, four are converted and waiting,
+and **six have not been started**. Of the six, only `prow-charts` carries tokens; the rest are
+blocked on nothing but an Application each.
+
 | item | blocker |
 |---|---|
-| — | **All paths now have charts and Applications.** Nothing is live: four await push, apply and cutover. The generator was never changed; see below |
+| the four converted paths | push, `terraform apply`, then cut over. No code left to write; see the two sections below for their specifics |
+| `prow-charts` → `prow-config`, `prow-data-plane` | **the substantial one, and previously unlisted.** These two HelmReleases carry the Prow components themselves and 12 distinct tokens across 25 occurrences in their `values` blocks, substituted by `prow-charts`' `postBuild`. The charts already exist (`prow/config`, `prow/data-plane`) so no chart work is needed — the work is moving ~40 values from HelmRelease `values` into Application `helm`, and `reconcileStrategy: ChartVersion` on both means template edits are ignored until `Chart.yaml` `version` bumps (see Traps) |
+| `prow-crds`, `prometheus`, `prometheus-dashboards`, `secrets` | **zero tokens between them.** Nothing blocks these but an Application each — no substitution problem, so they are the cheapest remaining work. (`prometheus-dashboards` has six `${...}` occurrences, all lowercase Grafana datasource refs, not Flux tokens.) |
+| Phase 5 deletions | `flux/flux` (Flux itself, 5 tokens), `flux/prow/version`, `flux/prow/build-cluster-kubeconfig`, the root `test-infra` Kustomization, `self-managed-vars`. `flux/argocd/` is the exception: it must survive and needs a new owner, since Argo CD cannot apply the objects that authorise Argo CD |
 | `prow-build-cluster-resources` | chart written and Application declared; **needs push, apply and cutover**, none of which has happened. See below |
 
 ### Next task in detail: `prow-build-cluster-resources`
@@ -419,15 +429,18 @@ cannot — see Traps). That was not needed: Argo CD's per-resource `Force=true,R
 covers it without taking the Job out of the tracked set, which is what keeps `selfHeal` able
 to re-run it.
 
-Unrelated but found while measuring, and worth someone's attention: `dev.tfvars` sets
-`periodics_enabled = "false"`, but that variable is not declared in `bootstrap/variables.tf`
-and nothing plumbs it into `prow/jobs/jobs_config.yaml`, which is committed as `true` and
-shared by every environment. Dev's intent to disable periodics has no effect today. Flipping
-it also changes the *shape* of `jobs.yaml` (`periodics: []` instead of the rendered dir), so
-it is not a value swap.
+Unrelated but found while measuring, and worth someone's attention: **`periodics_enabled` is
+not wired to anything.** `prow/jobs/jobs_config.yaml` commits it as `true`, shared verbatim by
+every environment, and it is not declared in `bootstrap/variables.tf` — its only other
+appearance is the struct tag in the generator. A `dev.tfvars` was setting it to `"false"`, which
+Terraform never read; that file is generated from SSM, untracked, and has been removed, so the
+committed `true` is now the only value anywhere. If an environment ever needs periodics off,
+note that it changes the *shape* of `jobs.yaml` (`periodics: []` instead of the rendered
+directory) rather than a value, so it is a large diff and not a parameter.
 
-Flux removal must be the **last** change merged, after every stage cuts over; all three share
-one tree.
+Flux removal must be the **last** change merged, after every stage cuts over — and after the
+six unstarted paths above, not just these three. The generated paths share one tree, so their
+conversions land together or not at all.
 
 ## Traps
 
