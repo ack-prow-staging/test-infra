@@ -331,6 +331,35 @@ locals {
       # upstream, and upgrade-prow.sh would overwrite the edit.
       path             = "flux/prow/crds"
       target_namespace = "prow"
+
+      # THE APPLY MODE FOR THIS PATH IS PINNED ON THE MANIFEST, not here. The ProwJob CRD is
+      # 667 KB, and Argo CD applied it CLIENT-side despite ServerSideApply=true at the
+      # Application level, which fails outright:
+      #
+      #   CustomResourceDefinition "prowjobs.prow.k8s.io" is invalid: metadata.annotations:
+      #   Too long: may not be more than 262144 bytes
+      #
+      # That is kubectl apply trying to store the whole manifest in
+      # kubectl.kubernetes.io/last-applied-configuration. The Argo CD docs name this exact case
+      # for Replace=true: "a resource spec might be too large and won't fit into the
+      # ... annotation that is added by kubectl apply".
+      #
+      # Confirmed it is not the request shape: the sync failed identically whether or not the
+      # requested operation carried syncStrategy.apply, and the live CRD holds only 120 bytes of
+      # annotations, so there was no stale one to blame.
+      #
+      # Replace=true was tried first and did not help - the failure stayed a client-side patch -
+      # and it was dropped again because Replace takes precedence over ServerSideApply, which is
+      # the opposite of what this path needs. The fix is the per-resource
+      # argocd.argoproj.io/sync-options annotation on the CRD itself; see the note there, which
+      # also records that scripts/upgrade-prow.sh will strip it on the next Prow upgrade.
+
+      # automated, and for this path it is not just the final cutover step - it is the only way the
+      # sync honours the Application's own syncOptions. A sync requested by patching `operation`
+      # ignored both ServerSideApply and Replace and fell back to a client-side patch, failing on the
+      # annotation size limit. The doc already records that a hand-crafted operation behaves
+      # differently from a real sync; this is the same lesson with a different symptom.
+      automated = true
     }
     prow-jobs = {
       # Last of the generated paths. Same shape as the other two - chart in the generated
@@ -538,12 +567,17 @@ resource "kubernetes_manifest" "argocd_application" {
       }
 
       syncPolicy = merge({
-        syncOptions = [
+        syncOptions = concat([
           "ServerSideApply=true",
           # Namespaces are owned by prow-namespaces.yaml and by Terraform, never by a
           # chart, so Argo CD must not create them either.
           "CreateNamespace=false",
-        ]
+          ],
+          # Per-path additions. Currently only prow-crds, which needs Replace=true; see that
+          # entry. Kept as an explicit opt-in rather than a default because Replace takes
+          # precedence over ServerSideApply and is destructive in a way SSA is not.
+          lookup(each.value, "extra_sync_options", [])
+        )
         },
         # automated is set only on paths that are cut over, and it is what makes the
         # cutover complete rather than merely started. Once a path's HelmRelease is
