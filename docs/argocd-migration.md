@@ -1098,6 +1098,50 @@ from git does not delete what it applied.** `prune: false` is what makes cutover
 it is also what leaves debris. Anything retired that way needs its objects reconciled down by
 hand, or they sit unowned until someone reads a label and wonders.
 
+### Dropping the built-in node pool takes two invisible things with it
+
+Removing the nodepool swap raised the question of whether the `general-purpose` pool was needed at
+all. With Flux gone and both Argo CD and ACK running off-cluster, nothing needs capacity before
+Argo CD syncs, so `compute_config.node_pools = []` looks free. It is not, and the reasons were
+established by trying it against staging rather than by reading.
+
+`node_pools` is the only lever. The NodePool object itself carries
+`app.kubernetes.io/managed-by: eks` with no owner references and no field managers, so the control
+plane reconciles it back after deletion — which is why the old `swap_nodepool` never durably
+removed anything.
+
+Setting it empty removes two things the cluster depends on and neither is named in the diff:
+
+- the EKS-managed **`default` NodeClass**, which both hub NodePools reference by name. They
+  keep existing and reporting as healthy objects while launching nothing.
+- the auto-created **node-role AccessEntry**. Without it a node boots, fails to authenticate,
+  and never registers — which presents as a capacity problem, not an authorisation one.
+
+Both must be declared explicitly *before* the pool goes. The build cluster has run that way
+since it was created and carries both, so it is the working reference rather than a design
+question. Repointing the pools also drifts existing nodes, so Karpenter replaces them: sequence
+it before the Terraform change, not with it.
+
+**Declaring the AccessEntry is where this stops being mechanical.** Adopting the auto-created
+entry with an `accessPolicies` block fails permanently:
+
+> `InvalidParameterException: This operation can only be performed on Access Entries with a
+> type of "STANDARD"`
+
+The entry EKS creates for Auto Mode nodes is type **EC2**, and policy association is a
+STANDARD-only operation. The build cluster's equivalent CR carries `accessPolicies` and syncs
+fine because ACK **created** it — type and policy in one call. Adoption cannot reach the same
+end state, because it arrives as a second association call against an EC2-type entry. An
+adopting CR must therefore omit `accessPolicies` entirely and let the existing association
+stand, which also means the CR no longer describes the permissions it appears to own.
+
+Two mechanics worth knowing before touching any of this, both observed here. **`deletion-policy:
+retain` is what makes an AccessEntry CR safe to remove** — the CR goes, the AWS entry stays, and
+since the nodes authenticate through that entry the alternative is an outage rather than a tidy-up.
+And **the NodeClass's `eks.amazonaws.com/termination` finalizer is not a hang.** It holds the
+object until the nodes launched from it have drained, and releases on its own once Karpenter
+finishes the replacement. Forcing it strands the nodes.
+
 ## Rules cited in code comments
 
 - **D3** — one-shot Jobs leave the sync path.

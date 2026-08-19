@@ -23,6 +23,26 @@ If the target environment tracks a branch rather than `main`, stage by cherry-pi
 advancing the branch stage by stage. If it tracks `main` directly, stage by advancing `main` and
 letting each stage converge before pushing the next.
 
+### Merge order at a glance
+
+Oldest first. The gate column is the short form; the stage section is authoritative.
+
+| stage | merge | gate before proceeding |
+|---|---|---|
+| 0 | nothing | baseline captured (uids, counts, access policies) |
+| 1 | `fix(ack): Set enableNetworkAddressUsageMetrics…`, the two prune commits | `prune: false` observed on every path's **live** spec |
+| 2 | `refactor(flux): Render the ACK and Prow paths from Helm charts`, … | unsuspended Kustomizations `Ready=True`, Prow uids unchanged |
+| 3 | `feat(argocd): Stand up the capability and authorise it without cluster-admin`, … | capability Healthy, RBAC applied, no cluster-admin granted |
+| 4 | `feat(argocd): Render the Applications from git via a root Application`, `feat(argocd): Give the Prow namespaces and ServiceAccounts an owner` | every Application Synced+Healthy **while Flux still owns the objects** |
+| 5 | `feat(argocd): Cut every path over to Argo CD` | Stage 4's gate passed for *every* path; presubmit runs end to end |
+| 6 | `chore: Remove kube-prometheus-stack and the Prow Grafana dashboards` | independent; merge whenever |
+| 7 | `feat(argocd): Remove Flux`, `chore(bootstrap): Remove Terraform's Flux footprint` | `terraform plan` clean, no Flux in state, CRDs/RBAC/namespace gone |
+| 8 | `chore: Sweep the remaining Flux references`, `chore(bootstrap): Remove the nodepool swap` | `terraform plan` clean, `general-purpose` NodePool Ready |
+
+**The `docs(...)` commits are inert** — `docs/argocd-migration.md` and this runbook, plus the
+comment-only corrections that ride with them. They touch nothing any reconciler reads and can be
+merged at any point, or all at the end. They are omitted from the table for that reason.
+
 ---
 
 ## Prerequisites
@@ -177,6 +197,27 @@ cd bootstrap && terraform apply -var-file=environment/<env>.tfvars
 
 The root creates the child Applications, which sync wave by wave. Waves exist because Argo CD has
 no `dependsOn`; they are derived from Flux's graph plus three edges Flux omitted.
+
+**A stalled wave blocks every wave behind it.** The root waits for each wave to report healthy
+before starting the next, so one child that cannot sync stops the rollout rather than being
+skipped. What that looks like is nothing happening: the later Applications sit `OutOfSync` with no
+error of their own, because they were never attempted. **Read the lowest wave that is not healthy
+and diagnose there** — an error on a wave-5 Application is a symptom, not a cause.
+
+```bash
+# lowest unhealthy wave first -- that is the only one worth reading
+kubectl --context $CTX -n argocd get applications.argoproj.io \
+  -o custom-columns='WAVE:.metadata.annotations.argocd\.argoproj\.io/sync-wave,NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status' \
+  --sort-by='.metadata.annotations.argocd\.argoproj\.io/sync-wave'
+```
+
+Wave 0 is `ack-capability-role` and `prow-namespaces`, and `prow-namespaces` is the one to suspect
+on this stage specifically: it needs the `namespaces` `create/update/patch` grant that
+`Give the Prow namespaces and ServiceAccounts an owner` adds to `bootstrap/argocd-rbac.tf`. Merging
+that commit without applying the Terraform in the same stage leaves the Application unable to sync
+and the whole tree parked behind it, presenting as a stall rather than as the permission error it
+is. Nothing is damaged — the Namespaces and ServiceAccounts already exist, and this path adopts
+rather than creates them — so the apply clears it.
 
 **Gate — every Application Synced and Healthy, and every adopted object's uid held.** Adoption
 happens under `ServerSideApply=true`: the Applications describe objects Flux already applied, so
@@ -345,9 +386,10 @@ exists. Delete it by hand.
   it; that ConfigMap was Flux's substitution source and went with the namespace, so the script
   would have failed on the next fresh bootstrap. Pass the values from the provisioner instead.
 - **`depends_on` edges into `null_resource.validate_kustomizations`**, which polled Flux
-  Kustomizations. `swap_nodepool` had one. Nothing replaces it: what it waited for is now
-  delivered by an Application, which Terraform cannot observe. Check the script polls for
-  itself before dropping the gate — `swap-nodepool.sh` does.
+  Kustomizations. The only one is `swap_nodepool`, and it goes in Stage 8 rather than here — the
+  edge is harmless in the meantime because the resource it gates never re-runs. If some other
+  resource carries such an edge, note that what it waited for is now delivered by an Application,
+  which Terraform cannot observe — the script must poll for itself.
 - **the node role's ECR pull-through-cache policy**, scoped to `repository/fluxcd/*`.
 - **the `ghcr-fluxcd` Secret lookup** and the `ghcrPtcSecretArn` chart value that fed
   `ack-flux`.
@@ -371,6 +413,56 @@ every Application path and is a separate change.
 Staging end state: 21 Applications Synced and Healthy, 10 Prow Deployments available, zero Flux
 CRDs, zero Flux namespaces, zero Flux cluster RBAC, no Flux access entries or pull-through cache
 rules in AWS, and a clean `terraform plan`.
+
+### Stage 8 — What outlived Flux
+
+Merge: `chore: Sweep the remaining Flux references`, `chore(bootstrap): Remove the nodepool swap`.
+
+Safe to merge together, and safe to defer — nothing here blocks anything. Both are cleanup of
+things that were only load-bearing while Flux existed, and both contain one item that is *not*
+inert.
+
+**The sweep** deletes the vendored `flux2` chart (46 files under `charts/`) and
+`scripts/pull-flux-chart.sh` that fetched it. The part to notice is
+**`scripts/upgrade-prow.sh`**, which read the Prow version from the `prow-version` ConfigMap in
+`flux-system`. That namespace is gone as of Stage 7, so the script was already broken at this
+point and would have failed the next time anyone bumped Prow. It now reads and writes the three
+chart values files directly. If the environment has automation or a documented procedure that
+calls it, re-read it after merging — the inputs and the files it edits both changed.
+
+**The nodepool swap** removes `null_resource.swap_nodepool` and
+`bootstrap/scripts/swap-nodepool.sh`, which deleted the built-in `general-purpose` NodePool once
+`prow-compute` was Ready. It existed because Flux ran on-cluster and needed capacity before the
+real pools were created. Argo CD and ACK both run off-cluster, so nothing needs capacity before
+the first sync.
+
+It was also never durable, which is the stronger reason to drop it. The NodePool carries
+`app.kubernetes.io/managed-by: eks` and has no owner references or field managers: while
+`compute_config.node_pools` lists it, the EKS control plane reconciles it back after deletion.
+Staging ran the swap and still has the pool. The `null_resource` was fighting the control plane
+and losing.
+
+This also drops the last `depends_on` edge into `null_resource.validate_kustomizations`, which
+polled Flux Kustomizations and has nothing left to poll.
+
+Apply is the only action: `terraform apply` destroys one `null_resource` and touches nothing else.
+
+**Do not take the next step of setting `compute_config.node_pools = []`.** It looks free once
+nothing needs bootstrap capacity, and it is not: it also removes the EKS-managed `default`
+NodeClass that both hub NodePools reference, and the auto-created node-role AccessEntry. The
+failure modes are quiet — pools that launch nothing while reporting as healthy objects, and nodes
+that fail to register in a way that reads as a capacity shortfall rather than an authorisation
+failure. `docs/argocd-migration.md` has the full account, including why an adopting AccessEntry CR
+cannot carry `accessPolicies`.
+
+**Gate:** `terraform plan` clean, `terraform state list | grep swap` empty, the `general-purpose`
+NodePool present and `Ready=True`, and every node `Ready` on the `default` NodeClass.
+
+```bash
+kubectl --context $CTX get nodepools.karpenter.sh \
+  -o custom-columns='NAME:.metadata.name,CLASS:.spec.template.spec.nodeClassRef.name,READY:.status.conditions[?(@.type=="Ready")].status'
+kubectl --context $CTX get nodeclass   # `default` only
+```
 
 ---
 
