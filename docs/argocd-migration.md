@@ -5,7 +5,7 @@ Replacing self-managed Flux with the AWS-managed EKS Argo CD capability. Validat
 
 Detailed rationale lives next to the code: each cut-over path's HelmRelease explains its
 own suspension, `bootstrap/argocd-applications.tf` explains the Application shape, and
-`flux/argocd/namespaced-rbac.yaml` explains the RBAC grant. This file is the map.
+`bootstrap/argocd-rbac.tf` explains the RBAC grant. This file is the map.
 
 ## State
 
@@ -47,9 +47,12 @@ state so a routine destroy/apply cannot take out the IdC instance. The hub clust
 `aws_eks_cluster.this`, not an ACK CR.
 
 Argo CD gets cluster-scoped objects without cluster-admin via a Kubernetes group on the
-capability's access entry, bound to narrow rules in `flux/argocd/`. Both RBAC files stay
-Flux-owned — Argo CD cannot apply the object that authorises Argo CD. Phase 5 decides who
-inherits them.
+capability's access entry, bound to narrow rules in **`bootstrap/argocd-rbac.tf`**. Argo CD
+cannot apply the objects that authorise Argo CD, so that path was never an Application; it
+was Flux's until Phase 5, and it is now Terraform's. Terraform is the right owner rather
+than the residual one — it already sets the group those objects bind
+(`aws_eks_access_entry.argocd_capability_group`), so both halves of one mechanism live
+together and neither can change without the other being visible.
 
 **Anything keyed to the build cluster is runtime-owned, never Terraform** (D13). The build
 cluster is an ACK `Cluster` CR, so Terraform holding a reference to it would be created
@@ -204,7 +207,6 @@ Nothing below is blocked on analysis; each item is work.
 | item | note |
 |---|---|
 | **Flux removal** | the point of all this. `flux/flux`, `flux/prow/version`, `flux/prow/build-cluster-kubeconfig`, the root `test-infra` Kustomization, `self-managed-vars`, and the now-redundant raw manifests under `flux/prow/build-cluster-resources/`. Also the six suspended Kustomizations and fourteen suspended HelmReleases, which exist only as reversal switches — deleting them is what makes the cutover irreversible, so it goes last |
-| `flux/argocd/` needs a new owner | it must survive Flux, because Argo CD cannot apply the objects that authorise Argo CD. Terraform is the obvious candidate; it already owns the access entry and the group |
 | dev and prod | this is staging only. The same branch drives all three, so each needs its own `terraform apply` and its own cutover, and prod deserves more care than the eight syncs took here |
 | the `secrets` grant's exit condition | narrow the CSI driver's ClusterRole to namespaced Roles, then delete the cluster-wide secrets rule outright. Written up beside the rule |
 | `periodics_enabled` | declared in no variable and plumbed nowhere; `jobs_config.yaml` commits `true` for every environment. Found while converting `prow-jobs`, unrelated to the migration |
@@ -374,7 +376,7 @@ here as evidence.
 **The blocker is the chart's own RBAC.** Rendered with the live values, `kube-prometheus-stack`
 84.5.0 produces 125 objects including **five ClusterRoles**. Escalation prevention requires the
 applier to hold every rule in a ClusterRole it creates, and measured against what the RBAC
-authorizer can actually see — `flux/argocd/cluster-scoped-rbac.yaml`, not the access policies:
+authorizer can actually see — `bootstrap/argocd-rbac.tf`, not the access policies:
 
 | | |
 |---|---|
@@ -690,7 +692,7 @@ the plugin's effective permissions, which belongs to whoever owns agent-plugin. 
 shrink the grantor rules to match; they only need to remain a superset.
 
 **Ordering requirement.** The grantor rules must be live *before* `prow-plugins` first syncs.
-They sit on the `flux/argocd` path, so Flux applies them. A sync attempted first fails on
+They sit in `bootstrap/argocd-rbac.tf`, so Terraform applies them. A sync attempted first fails on
 escalation with a message naming the plugin's ClusterRole rather than the missing grantor
 rule, which points at the wrong file.
 
@@ -767,6 +769,57 @@ Flux removal must be the **last** change merged, after every stage cuts over —
 six unstarted paths above, not just these three. The generated paths share one tree, so their
 conversions land together or not at all.
 
+### `flux/argocd/` moved to Terraform, adopted rather than recreated
+
+This was the one path that could never be an Application, and it was the last thing Flux
+owned, so it blocked Flux removal outright. It is now `bootstrap/argocd-rbac.tf`: 14 objects —
+one ClusterRole and its binding, four `admin` RoleBindings, and four grantor Roles with their
+bindings.
+
+**Typed resources, not `kubernetes_manifest` over the YAML.** The alternative was keeping the
+files and having Terraform apply them with `yamldecode`, which preserves the comments verbatim.
+Rejected because Terraform has no multi-document YAML decoder, so it needs `split("---", …)` —
+and these files are roughly half comment, including `---` separators inside comment blocks and
+`####` banners. A split on a delimiter that also appears in prose is a silent corruption
+waiting to happen. Typed resources also make the plan show the rules diff, which for an RBAC
+change is the thing a reviewer needs to see.
+
+**Adopted with `terraform import`, all 14.** A gap in the ClusterRoleBinding is a gap in Argo
+CD's authorisation, so delete-and-recreate was not acceptable even briefly. The gate on the
+transcription was the plan: `0 to add, 14 to change, 0 to destroy`, with every diff confined to
+removing the four now-meaningless metadata keys (`kustomize.toolkit.fluxcd.io/{name,namespace}`,
+`kustomize.toolkit.fluxcd.io/prune`, `helm.sh/resource-policy`). Checked against the plan JSON
+rather than by reading it, asserting that no `rules`, `role_ref` or `subject` differed. Then
+verified after apply: 14/14 uids held, and all **89** (group, resource, verb) triples across the
+ClusterRole and the four Roles probe as granted.
+
+**Suspend before deleting from git.** The root Kustomization has `prune: true`, so dropping
+`argocd.yaml` deletes the `argocd-rbac` Kustomization. That one has `prune: false`, so its
+objects should survive — but the whole grant rides on that reading being right, so it was
+suspended live first. kustomize-controller's delete path skips pruning when suspended, which
+makes the outcome independent of the flag. Cheap insurance on an object whose absence breaks
+every sync.
+
+Two traps, both of which produced a wrong answer before being understood:
+
+- **`kubectl auth can-i` reports a false `no` for cluster-scoped resources unless you pass
+  `--all-namespaces`.** Without it kubectl sends the context's namespace in the
+  SubjectAccessReview, and a namespaced request for a cluster-scoped resource matches nothing.
+  Probing the group for `create storageclasses` returned `no` while the grant was live and
+  working. This is the probe several comments in this repo cite as evidence, so read any `no`
+  from it twice — once for this, and once for the fact that access-policy grants are invisible
+  to it entirely.
+- **The Kubernetes provider defaults `subject.namespace` to `"default"`.** On a `Group` subject
+  that field is meaningless to the authorizer, but the provider writes it, so every binding
+  planned a `"" -> "default"` change on a field nothing reads. Setting `namespace = ""`
+  explicitly is what makes the plan clean, and a clean plan is what lets drift detection mean
+  something here.
+
+Also fixed while in the file: the `kubernetes` provider was never declared in
+`required_providers` and was being resolved implicitly, unpinned. It now carries a floor like
+the others. Six pre-existing files fail `terraform fmt -check` and were deliberately left
+alone — reformatting them would bury this change.
+
 ## Traps
 
 - `AmazonEKSAdminPolicy` at cluster scope **replaces** a namespace-scoped association of the
@@ -775,7 +828,7 @@ conversions land together or not at all.
   service-linked roles only. Declaring either makes every apply fail.
 - Argo CD cannot apply Role/RoleBinding objects unaided: escalation prevention only sees
   in-cluster RBAC, so access-policy authorisation counts for nothing. See
-  `flux/argocd/namespaced-rbac.yaml`.
+  `bootstrap/argocd-rbac.tf`.
 - `upgrade.force` does not fix Job immutability; Helm's force is a replace, still rejected on
   a changed Job `spec.template`. `force` is false everywhere.
 - `reconcileStrategy: ChartVersion` ignores template edits until `Chart.yaml` `version` bumps

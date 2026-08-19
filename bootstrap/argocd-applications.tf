@@ -309,7 +309,7 @@ locals {
       # than by convention. Its ClusterRole gives the CSI driver secrets
       # create/delete/get/list/patch/update/watch cluster-wide, and escalation prevention means
       # Argo CD must hold all seven to create it - read, write and delete on every Secret in the
-      # cluster. flux/argocd/cluster-scoped-rbac.yaml carries it, with the reasoning and the exit
+      # cluster. argocd-rbac.tf carries it, with the reasoning and the exit
       # condition. Read that before touching this, and prefer taking the exit: narrowing the
       # driver's own ClusterRole to namespaced Roles removes the grant entirely.
       #
@@ -448,7 +448,7 @@ locals {
       # What is different: this path's rbac.yaml carries a ClusterRole and ClusterRoleBinding,
       # and Argo CD could neither create those nor hold cluster-wide what they grant, so
       # escalation prevention would have refused them. That was a decision rather than a
-      # detail, and it was taken deliberately: flux/argocd/cluster-scoped-rbac.yaml now grants
+      # detail, and it was taken deliberately: argocd-rbac.tf now grants
       # both, which is the one privilege EXPANSION in this migration rather than a restatement
       # of access Argo CD already had. The alternative - narrowing the plugin's own ClusterRole
       # to namespaced Roles - is better and still open, but it changes generated RBAC and the
@@ -456,7 +456,7 @@ locals {
       # block in that file before touching this.
       #
       # ORDERING: those grantor rules must be live before this Application first syncs. They
-      # are on the flux/argocd path, so Flux applies them; a sync attempted first fails on
+      # are in argocd-rbac.tf, so Terraform applies them; a sync attempted first fails on
       # escalation with a message naming the ClusterRole rather than the missing rule.
       path             = "prow/plugins/deployments"
       target_namespace = "prow"

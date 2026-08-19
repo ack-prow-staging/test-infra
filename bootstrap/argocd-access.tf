@@ -321,7 +321,7 @@ resource "aws_eks_access_policy_association" "argocd_hub_ack" {
 #
 # Solved instead by adding a Kubernetes group to the capability role's access entry
 # and binding a narrow ClusterRole to it - see the access entry at the end of this
-# file and flux/argocd/cluster-scoped-rbac.yaml.
+# file and argocd-rbac.tf.
 ################################################################################
 
 ################################################################################
@@ -333,7 +333,7 @@ resource "aws_eks_access_policy_association" "argocd_hub_ack" {
 # username that cannot serve as an RBAC subject. The first half is true; the
 # conclusion was not. A group can be ADDED to the entry, and a group is bindable.
 #
-# With this set, flux/argocd/cluster-scoped-rbac.yaml binds a ClusterRole granting
+# With this set, argocd-rbac.tf binds a ClusterRole granting
 # exactly storage.k8s.io/storageclasses, networking.k8s.io/ingressclasses,
 # karpenter.sh/nodepools and eks.amazonaws.com/nodeclasses - the cluster-scoped
 # objects in the ack-cluster chart. Verified: all four sync, and adding the group
@@ -347,7 +347,7 @@ resource "aws_eks_access_entry" "argocd_capability_group" {
   cluster_name  = aws_eks_cluster.this.name
   principal_arn = local.argocd_capability_role_arn
 
-  # Must match the subject in flux/argocd/cluster-scoped-rbac.yaml.
+  # Must match the subject in argocd-rbac.tf, which consumes this via local.argocd_rbac_group.
   kubernetes_groups = ["argocd-cluster-scoped"]
 
   lifecycle {
