@@ -109,6 +109,42 @@ rules:
 - apiGroups: [""]
   resources: ["pods/log"]
   verbs: ["get"]
+
+################################################################################
+# For the `secrets` path. THIS IS THE WIDEST GRANT IN THE MIGRATION, and it was
+# authorised explicitly after being priced, not inferred from a convention.
+#
+# flux/secrets/secrets-store-rbac.yaml declares a ClusterRole granting the CSI
+# driver `secrets` create/delete/get/list/patch/update/watch cluster-wide.
+# Escalation prevention requires the applier to hold EVERY rule in a ClusterRole
+# it creates, so Argo CD must hold all seven verbs on every Secret in the cluster
+# for that object to apply. Measured before asking, with
+# `kubectl auth can-i <verb> secrets --all-namespaces
+#  --as-group=argocd-cluster-scoped`: all seven were no.
+#
+# BE CLEAR ABOUT WHAT THIS IS. It is not read access for health assessment. It is
+# read, write and delete on every Secret in the cluster, including credentials this
+# repo does not own, reachable by anything that can act as the Argo CD capability
+# role. There is no narrower version that still applies the object: granting a
+# subset fails the escalation check, and the only alternative mechanism is the
+# `escalate` verb, rejected here and in namespaced-rbac.yaml for being broader
+# still.
+#
+# THE EXIT CONDITION, which is cheaper than it looks and should be taken. Narrow
+# the CSI driver's own ClusterRole to namespaced Roles and this rule can be
+# deleted outright - Argo CD would then need only namespaced secrets write, which
+# AmazonEKSAdminPolicy already grants it. The measurements say that is viable: the
+# ClusterRoleBinding's only subject is the single secrets-store-csi-driver
+# ServiceAccount in aws-secrets-manager, and the only SecretProviderClasses in the
+# cluster are prow/prow-secrets and test-pods/prow-secrets, so the driver writes
+# Secrets in two namespaces rather than all of them.
+#
+# Mirrors the ClusterRole exactly, including delete. If that file's verbs change,
+# these must change with them or the sync fails.
+################################################################################
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

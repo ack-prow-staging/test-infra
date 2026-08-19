@@ -238,6 +238,27 @@ locals {
     # content. `prune: false` still had to go in first - deleting or suspending a Kustomization
     # with prune enabled garbage-collects what it applied, and for prow-crds that means the
     # ProwJob CRD and every ProwJob with it.
+    secrets = {
+      # Four objects: the CSI driver's ClusterRole and ClusterRoleBinding, and a
+      # SecretProviderClass in each of prow and test-pods. No tokens, so no conversion and no
+      # helm block - Argo CD reads the same kustomize directory Flux reads.
+      #
+      # target_namespace is only a default: two objects are cluster-scoped and the other two
+      # carry their own namespace, which is why one Application can span prow and test-pods.
+      #
+      # THIS PATH REQUIRED THE WIDEST RBAC GRANT IN THE MIGRATION, authorised explicitly rather
+      # than by convention. Its ClusterRole gives the CSI driver secrets
+      # create/delete/get/list/patch/update/watch cluster-wide, and escalation prevention means
+      # Argo CD must hold all seven to create it - read, write and delete on every Secret in the
+      # cluster. flux/argocd/cluster-scoped-rbac.yaml carries it, with the reasoning and the exit
+      # condition. Read that before touching this, and prefer taking the exit: narrowing the
+      # driver's own ClusterRole to namespaced Roles removes the grant entirely.
+      #
+      # Ordering: that grant must be live before this Application first syncs, or the sync fails
+      # on escalation naming the driver's ClusterRole rather than the missing rule.
+      path             = "flux/secrets"
+      target_namespace = "prow"
+    }
     prow-crds = {
       # One CustomResourceDefinition, cluster-scoped, so target_namespace is only a default.
       #
