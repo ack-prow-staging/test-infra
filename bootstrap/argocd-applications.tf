@@ -332,17 +332,6 @@ locals {
       path             = "flux/prow/crds"
       target_namespace = "prow"
     }
-    prometheus-dashboards = {
-      # Four Grafana dashboard JSONs in one generated ConfigMap. The generator sets
-      # disableNameSuffixHash and the grafana_dashboard: "1" label that Grafana's sidecar
-      # watches for, and kustomize under Argo CD honours both - they are plain
-      # generatorOptions, not a Flux feature.
-      #
-      # The ConfigMap carries no namespace of its own; the Flux Kustomization supplies it via
-      # targetNamespace, and here destination.namespace does the same job.
-      path             = "prow/prometheus-dashboards"
-      target_namespace = "prometheus"
-    }
     prow-jobs = {
       # Last of the generated paths. Same shape as the other two - chart in the generated
       # files' own directory, read with .Files.Get, generator untouched - but three things are

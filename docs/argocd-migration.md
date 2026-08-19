@@ -14,7 +14,8 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 | Kustomizations / HelmReleases Ready | 26/26, 17/17 |
 | Argo CD Applications | **12 live**, all Synced/Healthy. **16 declared**: 15 by Terraform, all hub-targeted, plus `prow-build-cluster-resources` which is build-cluster-targeted and therefore composed by the connection chart and applied by its Job, never by Terraform (D13). Verified: all 15 render with the exact values Terraform supplies |
 | Cut over | **12** paths, all `automated`, prune off everywhere |
-| Wired, not live | **9** — `prow-config`, `prow-data-plane`, `prow-jobs`, `prow-plugins`, `prow-agent-workflows`, `prow-build-cluster-resources`, `prow-crds`, `prometheus-dashboards`, `secrets`. All verified against live objects; awaiting push, apply and cutover |
+| Wired, not live | **8** — `prow-config`, `prow-data-plane`, `prow-jobs`, `prow-plugins`, `prow-agent-workflows`, `prow-build-cluster-resources`, `prow-crds`, `secrets`. All verified against live objects; awaiting push, apply and cutover |
+| Deleted, not migrated | **1** — `prometheus-dashboards` and its recording rules. Unmaintained since 2021 |
 | ACK CRs | 64, all Argo CD-tracked, 0 deleting |
 | Still on Flux, not started | **1** — `prometheus`. Blocked on a privilege decision, not on code: its chart's five ClusterRoles would need 112 further cluster-wide triples, which is cluster-admin by another name. See *What is left* |
 | Clusters registered | 2 — hub, plus the build cluster as a spoke |
@@ -352,12 +353,14 @@ covers all seven of the driver ClusterRole's triples exactly, and no token needs
 
 ### The token-free paths need no conversion at all
 
-`prow-crds` and `prometheus-dashboards` are now wired, and they are the first paths that
-required **no chart and no generator change**. Both are plain kustomize directories with no
-`${TOKEN}`, so Argo CD reads the same directory Flux reads and runs kustomize itself. That is
-worth stating plainly: the chart conversions were never about Helm being better, only about
-`postBuild` substitution having no Argo CD equivalent. With no tokens, there is nothing to
-solve.
+`prow-crds` and `secrets` are wired this way, and they were the first paths that required **no
+chart and no generator change**. Both are plain kustomize directories with no `${TOKEN}`, so Argo
+CD reads the same directory Flux reads and runs kustomize itself. That is worth stating plainly:
+the chart conversions were never about Helm being better, only about `postBuild` substitution
+having no Argo CD equivalent. With no tokens, there is nothing to solve.
+
+`prometheus-dashboards` was wired the same way and then **deleted instead of migrated** — see
+*Deleted rather than migrated* below. These notes describe the shape; that path is gone.
 
 Consequences specific to this shape:
 
@@ -370,20 +373,40 @@ Consequences specific to this shape:
 - `prune: false` still had to land first, and for a different reason than usual: deleting or
   suspending a Kustomization with prune enabled garbage-collects what it applied. For
   `prow-crds` that is the ProwJob CRD, and it would take every ProwJob with it.
-- `kustomize` features carry over unchanged — `prometheus-dashboards` relies on
-  `disableNameSuffixHash` and the `grafana_dashboard: "1"` label from `generatorOptions`, both
-  plain kustomize, not Flux.
+- `kustomize` features carry over unchanged. `generatorOptions` — `disableNameSuffixHash`, and
+  labels applied to generated ConfigMaps — is plain kustomize, not Flux, so Argo CD honours it.
 
-Verified: the dashboards ConfigMap renders byte-identical to live, same four keys and label. The
-CRD matches on every field except `spec.preserveUnknownFields: false`, which the API server
-accepts and drops as deprecated — recorded against that Application as the one thing to expect
-on first sync, with no `ignoreDifferences` added pre-emptively, per the rule above.
+Verified: all four `secrets` objects render identical to live, and the CRD matches on every field
+except `spec.preserveUnknownFields: false`, which the API server accepts and drops as deprecated —
+recorded against that Application as the one thing to expect on first sync, with no
+`ignoreDifferences` added pre-emptively, per the rule above.
+
+### Deleted rather than migrated: the Prow Grafana dashboards
+
+`prow/prometheus-dashboards/` and the `prow-rules` recording rules in
+`flux/prometheus/helm-release.yaml` are gone. They were one artifact set, added together in a
+single commit in September 2021 (`93470a6`, taken from `loodse/prow-dashboards`) and never touched
+again in the roughly five years since. Nothing outside that set referenced the `prow:pod` /
+`prow:job` series the rules computed — the only files mentioning them were the rules themselves
+and the four dashboard JSONs — so the rules existed solely to feed dashboards nobody was
+maintaining. Carrying them across would have meant an Application, a cutover and a uid check for
+5,437 lines of JSON on the assumption someone still opened them.
+
+Both live objects are cleaned up by Flux rather than by hand, which is worth knowing before going
+looking for them. The `prometheus-dashboards` Kustomization was applied with `prune: true`, so
+deleting it from git garbage-collects the `grafana-prow-dashboards` ConfigMap; the PrometheusRule
+disappears as an object dropped from the `prometheus` Helm release. Verified by rendering the chart
+without the rules: 124 objects instead of 125, and no `prow` PrometheusRule.
+
+Grafana itself stays. Its sidecar picks up 29 dashboard ConfigMaps and 28 come from the chart; only
+the one was ours.
 
 | item | blocker |
 |---|---|
 | the four converted paths | push, `terraform apply`, then cut over. No code left to write; see the two sections below for their specifics |
 | ~~`prow-charts`~~ → ~~`prow-config`~~, ~~`prow-data-plane`~~ | **done.** The data-plane half was free; `prow-config` needed a chart change plus 12 parameters and no `values` block. See below |
-| ~~`prow-crds`, `prometheus-dashboards`~~ | **done.** Both were genuinely just an Application each — see below |
+| ~~`prow-crds`~~ | **done.** Genuinely just an Application — see below |
+| ~~`prometheus-dashboards`~~ | **deleted, not migrated.** Unmaintained since 2021 and nothing referenced its metrics — see below |
 | ~~`secrets`~~ | **done**, and it cost the widest grant in the migration. Take the exit condition — see below |
 | `prometheus` | **the only path left, and it is not a mechanism problem.** Migrating it as-is would make Argo CD effectively cluster-admin. Measured below; needs a decision, not code |
 | Phase 5 deletions | `flux/flux` (Flux itself, 5 tokens), `flux/prow/version`, `flux/prow/build-cluster-kubeconfig`, the root `test-infra` Kustomization, `self-managed-vars`. `flux/argocd/` is the exception: it must survive and needs a new owner, since Argo CD cannot apply the objects that authorise Argo CD |

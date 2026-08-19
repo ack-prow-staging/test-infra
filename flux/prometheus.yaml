@@ -1,5 +1,15 @@
 # Prometheus + Grafana monitoring stack for Prow
-# Deploys kube-prometheus-stack with Prow-specific scrape configs and dashboards
+# Deploys kube-prometheus-stack with Prow-specific scrape configs.
+#
+# The prometheus-dashboards Kustomization that used to follow this one is gone, along with
+# prow/prometheus-dashboards/ and the prow-rules recording rules in helm-release.yaml. They were
+# added together in one commit in September 2021 (93470a6, from loodse/prow-dashboards) and never
+# touched again; nothing outside that set referenced the prow:pod / prow:job series the rules
+# computed. Removed during the Argo CD migration rather than carried across it.
+#
+# Its live ConfigMap is cleaned up by Flux rather than by hand: the Kustomization was applied with
+# prune: true, so deleting it from git garbage-collects grafana-prow-dashboards. The PrometheusRule
+# goes the same way, as an object dropped from the prometheus Helm release.
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
@@ -19,22 +29,3 @@ spec:
       name: self-managed-vars
   dependsOn:
   - name: prow-charts
----
-apiVersion: kustomize.toolkit.fluxcd.io/v1
-kind: Kustomization
-metadata:
-  name: prometheus-dashboards
-  namespace: flux-system
-spec:
-  interval: 60m
-  sourceRef:
-    kind: GitRepository
-    name: test-infra
-  path: ./prow/prometheus-dashboards
-  # prune disabled ahead of the Argo CD cutover (D19-P1), for the same reason as prow-crds:
-  # this path is not converted, Argo CD reads the same directory, and cutover is suspending
-  # this Kustomization. With prune enabled that would garbage-collect the dashboards ConfigMap.
-  prune: false
-  targetNamespace: prometheus
-  dependsOn:
-  - name: prometheus
