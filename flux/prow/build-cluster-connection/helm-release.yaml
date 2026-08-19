@@ -41,7 +41,8 @@ spec:
   # Job a re-run trigger, and this chart owns only RBAC and a Job with no AWS resource
   # behind it. See the note there.
   #
-  # The seven RBAC objects are the tracked set and span flux-system, ack-system and prow -
+  # The tracked set is the RBAC objects plus the build-cluster-resources-application
+  # ConfigMap, and it spans flux-system, ack-system, prow and argocd -
   # the Job reads the CR in one namespace and writes the ConfigMap in another - so the
   # Application's destination namespace is only a default. Applying them needs
   # flux/argocd/namespaced-rbac.yaml, which must stay in place.
@@ -65,6 +66,13 @@ spec:
     # work anyway: Helm force is a replace, and the API server still rejects a
     # changed Job spec.template as immutable.
     force: false
+  # THIS CANNOT BE UNSUSPENDED AS IT STANDS, and that is a deliberate consequence rather
+  # than an oversight. The chart now also composes the prow-build-cluster-resources
+  # Application, which needs the CONTENT of prow/jobs/test_config.yaml as a value.
+  # valuesFrom reads ConfigMaps and Secrets, so Flux has no way to supply a file from the
+  # repo; Terraform does, with file(), through the Application's helm.values. Unsuspending
+  # would fail on `testConfig is required` - loudly, at render time, which is the right
+  # failure. Phase 5 deletes this file.
   valuesFrom:
   - kind: ConfigMap
     name: self-managed-vars
@@ -74,3 +82,18 @@ spec:
     name: self-managed-vars
     valuesKey: STACK_NAME
     targetPath: stackName
+  # Repo coordinates for the composed Application's source. These three do exist in
+  # self-managed-vars, so they are wired here for completeness even though the path is
+  # suspended - leaving them out would make the file look like it had simply not kept up.
+  - kind: ConfigMap
+    name: self-managed-vars
+    valuesKey: TEST_INFRA_ORG
+    targetPath: testInfraOrg
+  - kind: ConfigMap
+    name: self-managed-vars
+    valuesKey: TEST_INFRA_REPO
+    targetPath: testInfraRepo
+  - kind: ConfigMap
+    name: self-managed-vars
+    valuesKey: TEST_INFRA_BRANCH
+    targetPath: testInfraBranch

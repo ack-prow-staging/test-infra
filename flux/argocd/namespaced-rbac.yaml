@@ -51,6 +51,7 @@
 #   build-cluster-connection-kubeconfig prow         configmaps get,create,update,patch
 #   build-cluster-connection-registrar  argocd       secrets    get,create,update,patch
 #                                       argocd       appprojects get,patch
+#                                       argocd       applications get,create,update,patch
 #
 # Reconciled by Flux, like cluster-scoped-rbac.yaml, for the same reason: Argo CD
 # cannot apply the object that authorises Argo CD. Phase 5 has to decide who owns both.
@@ -203,6 +204,21 @@ rules:
 - apiGroups: ["argoproj.io"]
   resources: ["appprojects"]
   verbs: ["get", "patch"]
+# The Job also applies the prow-build-cluster-resources Application. Runtime work for the
+# third time and for the same reason: its destination names the build cluster, so Terraform
+# must not declare it (D13). Terraform declares only Applications targeting the hub.
+#
+# Matches build-cluster-connection-registrar, which needs create here rather than just
+# patch: the Job owns that Application outright instead of amending one Terraform owns.
+# No delete, in either place.
+#
+# Note that Argo CD granting itself write on Applications is not a privilege increase -
+# AmazonEKSArgoCDPolicy already gives the capability full control of its own CRs in this
+# namespace. This rule exists only so the RBAC authorizer can see it, which is what
+# escalation prevention checks when Argo CD applies the chart's Role.
+- apiGroups: ["argoproj.io"]
+  resources: ["applications"]
+  verbs: ["get", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

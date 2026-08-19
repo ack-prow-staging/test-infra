@@ -12,7 +12,7 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 | | |
 |---|---|
 | Kustomizations / HelmReleases Ready | 27/27, 17/17 |
-| Argo CD Applications | 12 live, all Synced/Healthy. A 13th (`prow-build-cluster-resources`) is declared in Terraform but **not applied** — see below |
+| Argo CD Applications | 12 live, all Synced/Healthy — all 12 Terraform-declared and hub-targeted. A 13th (`prow-build-cluster-resources`, build-cluster-targeted) is composed by the connection chart and applied by its Job, and is **not live yet** — see below |
 | Cut over | **12 of 13** chart paths, all `automated`, prune off everywhere |
 | ACK CRs | 64, all Argo CD-tracked, 0 deleting |
 | Still on Flux | `prow-build-cluster-resources` (raw manifests, awaiting cutover) and the three `${TOKEN}` paths |
@@ -52,10 +52,11 @@ inherits them.
 **Anything keyed to the build cluster is runtime-owned, never Terraform** (D13). The build
 cluster is an ACK `Cluster` CR, so Terraform holding a reference to it would be created
 before the cluster exists on a fresh bootstrap and removed while Applications still
-referenced it on destroy. The `prow-build-cluster-connection` Job therefore does three
-things beyond Prow's kubeconfig: reads the cluster ARN from the CR status, writes the Argo CD
-spoke registration Secret in `argocd`, and appends the spoke to the AppProject's
-`destinations`. Registration alone is not enough — an Application whose `destination.server`
+referenced it on destroy. This covers Kubernetes objects, not just AWS ones. The
+`prow-build-cluster-connection` Job therefore does four things beyond Prow's kubeconfig:
+reads the cluster ARN from the CR status, writes the Argo CD spoke registration Secret in
+`argocd`, appends the spoke to the AppProject's `destinations`, and applies the
+`prow-build-cluster-resources` Application. Registration alone is not enough — an Application whose `destination.server`
 is not listed in its project is *rejected*, not failed at sync.
 
 That last one is why `kubernetes_manifest.argocd_project` carries
@@ -63,21 +64,30 @@ That last one is why `kubernetes_manifest.argocd_project` carries
 the list to hub-only; nothing errors, because the Job re-adds it, but in between
 build-cluster Applications are rejected — a symptom appearing far from its cause.
 
-**D13 has exactly one carve-out: the `prow-build-cluster-resources` Application.** Its
-`destination.server` names the build cluster, and Terraform declares it
-(`local.argocd_build_cluster_arn`). D13's two failure modes do not bite for an Application:
-created before the cluster exists it is *rejected* — a condition, applying nothing, valid
-the moment the Job registers the spoke — and deleted it *orphans* its objects, because
-cascade requires the `resources-finalizer.argocd.argoproj.io` finalizer and Terraform does
-not set it. Compare the registration Secret, which would advertise a cluster Argo CD cannot
-reach, and the AppProject destination, which an apply would revert.
+**D13 has no exceptions, and the temptation to make one is worth recording.** The
+`prow-build-cluster-resources` Application names the build cluster in
+`destination.server`, so Terraform must not declare it either — it is the *fourth* thing
+the Job owns, alongside Prow's kubeconfig, the registration Secret and the AppProject
+destination. An earlier attempt reasoned that an Application was different because it is
+merely *rejected* when its destination is unregistered, and *orphans* its objects when
+deleted, and so is harmless in both directions D13 worries about. That is true and still
+beside the point: the rule is about what Terraform may hold a reference to, not how bad the
+failure looks. A constructed ARN is a reference to a cluster ACK owns.
 
-The ARN is **constructed** from `partition`/`region`/`account_id`/`stack_name`, never read,
-so there is no plan-time dependency on the CR. The Job still reads it from the CR status
-for the Secret and the destination, where the read doubles as proof the cluster exists.
-Having the Job create this Application instead was rejected: `repoURL`, `targetRevision`
-and the chart values are Terraform's, so the Job would need them threaded through its own
-chart, and one path would end up with two owners.
+The distinction that does hold is **values versus objects**. Terraform already supplies
+`stackName` and `prowImagesRepoUri` to that Job, and the Job builds
+`${stackName}-build-cluster` from them; supplying `testInfraOrg`, `testInfraRepo`,
+`testInfraBranch` and the `test_config.yaml` content is the same arrangement. Terraform
+supplies values; the Job holds the objects and reads the ARN from the CR status, where the
+read doubles as proof the cluster exists.
+
+The Application manifest is composed by the chart into the
+`build-cluster-resources-application` ConfigMap and applied by the Job, rather than built
+in the Job's shell. That keeps Helm responsible for three levels of nested indentation
+(Application → `helm.values` → `test_config.yaml`), and it gives this hook-driven chart a
+**tracked** object carrying the Application's desired state — so editing the Application is
+drift, which syncs, which re-runs the hook that applies it. Without that, a chart of
+nothing but hooks can never drift and never syncs.
 
 The hub's Argo CD holds **cluster-admin on the build cluster**
 (`argocd-build-cluster-access` in the `ack-build-infra` chart). It is a lateral move, not an
@@ -157,10 +167,15 @@ all; parse them. They also rewrite `generation` harmlessly on sync.
 
 ### Next task in detail: `prow-build-cluster-resources`
 
-The chart exists (`flux/prow/charts/prow-build-cluster-resources`, 13 objects) and the
-Application is declared in `bootstrap/argocd-applications.tf`. **Nothing is live.** Argo CD
-reads git, so the chart has to be pushed before the Application can render, and the
-Application has to be applied before it can sync.
+The chart exists (`flux/prow/charts/prow-build-cluster-resources`, 13 objects) and its
+Application is composed by `prow-build-cluster-connection`'s
+`templates/application.yaml` and applied by that chart's Job. **Nothing is live.** Argo CD
+reads git, so the branch has to be pushed before either chart renders the new content.
+
+Note what applying it does *not* need: no `terraform apply` creates this Application.
+Terraform's only change here is three more parameters and a `values` string on the
+*connection* Application, which is hub-targeted. Once that lands, the connection path
+syncs, the ConfigMap appears, the Job runs and the build-cluster Application exists.
 
 What the conversion settled, so it is not re-derived:
 
@@ -175,6 +190,13 @@ What the conversion settled, so it is not re-derived:
   `kubernetes_manifest` types it dynamically. `values` is a plain string the provider
   handles predictably, and Argo CD writes it to a values file, so multi-line content passes
   through untouched.
+- The Application is **runtime-owned** (D13), composed into a ConfigMap by the connection
+  chart and applied by its Job. Terraform declaring it — with the ARN constructed from
+  `partition`/`region`/`account_id`/`stack_name` — was tried and reverted; see *Ownership*
+  for why "the failure mode is harmless" is not a reason to hold the reference. The content
+  is verified intact through all three nesting levels: Terraform `yamlencode` → connection
+  `helm.values` → ConfigMap → composed Application `helm.values` → the rendered ConfigMap
+  equals both the source file and the live object.
 - **This path cannot have a HelmRelease, so there is nothing to suspend.** The
   build-cluster `PodIdentityAssociation` binds `serviceAccount: kustomize-controller`
   (`ack-build-infra/templates/flux-pod-identity.yaml`), so helm-controller has no identity
@@ -194,18 +216,28 @@ What the conversion settled, so it is not re-derived:
 
 Remaining steps, in order:
 
-1. Push the branch. Until then the Application would render nothing and report a
-   ComparisonError, which is why it is deliberately left unapplied.
+1. Push the branch. Both charts are read from git, so nothing before this has any effect.
 2. `terraform apply` with the branch override from *Applying Terraform during the
-   migration*. Expect **1 to add** — the Application — plus three in-place
-   `prune: null -> false` / `selfHeal: null -> false` normalisations on `ack-build-infra`,
-   `prow-build-cluster-connection` and `prow-mirror`, which are pre-existing and unrelated.
-   Verified by a targeted plan.
-3. Cut over per *Cutting over a path*, with step 2 replaced by "delete the raw manifests
-   from `flux/prow/build-cluster-resources/` in git". The snapshot to check against is the
-   13 uids; content was already confirmed identical, so the only expected change on the
-   first sync is annotations — the tracking-id Argo CD adds, plus the guards above.
-4. Then `automated = true`, `prune` and `selfHeal` off as everywhere else.
+   migration*. Expect **0 to add, 3 to change**: the connection Application gains
+   `testInfraOrg`/`testInfraRepo`/`testInfraBranch` parameters and the `values` string, and
+   `ack-build-infra`, `prow-build-cluster-connection` and `prow-mirror` each show a
+   pre-existing `prune: null -> false` / `selfHeal: null -> false` normalisation. Verified by
+   a targeted plan. **No plan entry should mention the build cluster** — that is the check
+   that D13 still holds.
+3. Let the connection path sync. It has `selfHeal`, so the new ConfigMap and the re-run hook
+   follow automatically. Confirm the Job's log shows the spoke registered, the AppProject
+   destination present, and the Application applied; then confirm
+   `kubectl -n argocd get app prow-build-cluster-resources` exists and is **not** rejected
+   (a rejected Application means the destination is missing from the project, i.e. the
+   ordering inside the Job broke).
+4. Sync it once manually and confirm all 13 uids held against
+   `/tmp/prow-build-cluster-resources-uid-baseline.json`. Content is already confirmed
+   identical, so the only expected change is annotations — Argo CD's tracking-id plus the
+   guards on the Namespace, NodeClass and NodePool.
+5. Cut over per *Cutting over a path*, with step 2 replaced by "delete the raw manifests from
+   `flux/prow/build-cluster-resources/` in git", then add the `automated` block that
+   `templates/application.yaml` carries commented out. `prune` and `selfHeal` stay off, as
+   everywhere else.
 
 Nothing Phase 5 deletes needs migrating: `prow-build-cluster-kubeconfig` was dropped for
 that reason, and `ack-flux` qualifies too (already cut over, harmless).
@@ -243,9 +275,11 @@ Argo CD pruning.
 - **D7** — controllers run off-cluster and cannot be scraped; capability log delivery
   (`bootstrap/argocd-logs.tf`) is the compensating control, and the only way to see why a
   sync behaved as it did.
-- **D13** — build cluster AWS resources are only ever ACK CRs on the hub, never Terraform.
-  One carve-out, the `prow-build-cluster-resources` Application's `destination.server`; the
-  reasoning is under *Ownership* and in the code beside it.
+- **D13** — anything keyed to the build cluster is runtime-owned, never Terraform. Its AWS
+  resources are ACK CRs on the hub; the Kubernetes objects that name it — the registration
+  Secret, the AppProject destination, the `prow-build-cluster-resources` Application — are
+  written by the `prow-build-cluster-connection` Job. **No exceptions**; Terraform supplies
+  values to that Job, never objects. See *Ownership*.
 - **D14** — CRD write needs `AmazonEKSKROPolicy`. Its claim that in-cluster RBAC is
   impossible was **wrong**: a group can be added to the access entry and is bindable.
 - **D16** — registering the cluster by ARN replaces Flux's own kubeconfig but not Prow's, so

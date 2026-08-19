@@ -186,6 +186,26 @@ spec:
               -p "[{\"op\":\"add\",\"path\":\"/spec/destinations/-\",\"value\":{\"server\":\"${ARN}\",\"namespace\":\"*\"}}]"
             echo "AppProject $PROJECT updated."
           fi
+
+          # Apply the prow-build-cluster-resources Application.
+          #
+          # Third and last of the build-cluster-keyed objects this Job owns, for the same
+          # reason as the other two: its destination names a cluster ACK creates, so
+          # Terraform must not declare it (D13). Terraform supplies the values; the ARN,
+          # the one thing it cannot know, is substituted here.
+          #
+          # The manifest itself is composed by the chart and mounted from the
+          # build-cluster-resources-application ConfigMap - see templates/application.yaml
+          # for why it is not a heredoc here. Only the ARN placeholder is filled in.
+          #
+          # Ordering matters and is why this is last: an Application whose
+          # destination.server is absent from its project's destinations is rejected
+          # outright, so the registration and the AppProject patch above must both have
+          # happened first.
+          echo "Applying the prow-build-cluster-resources Application..."
+          sed "s|__BUILD_CLUSTER_ARN__|${ARN}|" /etc/application/application.yaml \
+            | kubectl apply -f -
+          echo "prow-build-cluster-resources Application applied."
         resources:
           requests:
             cpu: "50m"
@@ -193,3 +213,19 @@ spec:
           limits:
             cpu: "200m"
             memory: "128Mi"
+        volumeMounts:
+        - name: application
+          mountPath: /etc/application
+          readOnly: true
+      volumes:
+      # The composed Application manifest. A mount rather than a `kubectl get -o jsonpath`
+      # read, so the manifest reaches the container exactly as the chart rendered it with
+      # no shell quoting in the path.
+      #
+      # This ConfigMap is a normal tracked object of the chart, not a hook, so both
+      # reconcilers have it in place before the hook runs: Helm applies release resources
+      # before post-install/post-upgrade hooks, and Argo CD applies the sync wave before
+      # PostSync.
+      - name: application
+        configMap:
+          name: build-cluster-resources-application
