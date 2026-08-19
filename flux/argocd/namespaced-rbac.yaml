@@ -1,61 +1,129 @@
-# RBAC that lets Argo CD apply the Role and RoleBinding objects in the charts it
-# manages. Bound to the same kubernetesGroup on the capability role's EKS access entry
-# that cluster-scoped-rbac.yaml uses, which Terraform sets
+# RBAC that lets Argo CD apply the Role and RoleBinding objects in the charts it manages. Bound to
+# the kubernetesGroup on the capability role's EKS access entry, which Terraform sets
 # (bootstrap/argocd-access.tf).
 #
-# WHY THIS IS NEEDED, and why it is not a privilege increase.
+# WHY THIS EXISTS, and why it is not a privilege increase.
 #
-# Argo CD could not apply the seven RBAC objects in
-# flux/prow/charts/prow-build-cluster-connection. Every Role and RoleBinding was
-# refused:
+# Kubernetes escalation prevention: a principal may not create a Role granting permissions it does
+# not itself hold. The check lives inside the RBAC authorizer and resolves IN-CLUSTER RBAC only, so
+# a principal authorised entirely by EKS access policies holds nothing as far as it is concerned and
+# cannot create a Role granting anything at all. Argo CD hit this on every path carrying RBAC:
 #
 #   roles.rbac.authorization.k8s.io "build-cluster-connection-write" is forbidden:
 #   user ".../ack-test-infra-staging-argocd-capability-role/aws-go-sdk-..."
 #   (groups=["argocd-cluster-scoped" "system:authenticated"]) is attempting to grant
-#   RBAC permissions not currently held:
-#   {APIGroups:[""], Resources:["configmaps"], Verbs:["get" "create" "update" "patch"]}
+#   RBAC permissions not currently held: {APIGroups:[""], Resources:["configmaps"], ...}
 #
-# Kubernetes escalation prevention: a principal may not create a Role granting
-# permissions it does not itself hold. The permissions named are ones Argo CD does
-# hold and has been exercising throughout this migration - configmaps write in
-# flux-system and prow through AmazonEKSAdminPolicy, and
-# eks.services.k8s.aws/clusters read through AmazonEKSACKPolicy.
+# So these rules add no access Argo CD lacked. They restate what the associated access policies
+# already grant, in the form the RBAC authorizer can see.
 #
-# The mismatch is structural, not a misconfiguration. EKS access policies are enforced
-# by the EKS authorizer. Escalation prevention is implemented inside the RBAC
-# authorizer, and can only see in-cluster RBAC rules. A principal authorised entirely
-# by access policies therefore holds nothing as far as that check is concerned, and
-# cannot create a Role granting anything at all. This blocks any path containing RBAC
-# objects, not just this one.
+# HOW IT IS SHAPED, and why it stopped being a list of individual rules.
 #
-# So these rules add no access Argo CD lacked. They restate a subset of what the
-# associated access policies already grant, in the form the RBAC authorizer can see,
-# so the escalation check passes.
+# The first four paths were unblocked one rule at a time, each discovered by a failed sync. That
+# does not converge: every chart that adds a Role adds another round trip. Measured across the
+# remaining paths, 13 more triples were missing over two namespaces - and 12 of the 13 fall inside
+# the built-in aggregated `admin` ClusterRole.
 #
-# NAMESPACED, NOT CLUSTER-SCOPED, deliberately. Adding configmaps write to the
-# ClusterRole in cluster-scoped-rbac.yaml would grant it in every namespace, which is
-# broader than AmazonEKSAdminPolicy gives today - that association is scoped to
-# {ack-system, prow, test-pods, flux-system}. Three Roles in the three
-# namespaces that actually need them keeps the grant equal to the existing one rather
-# than wider.
+# AmazonEKSAdminPolicy is already associated to this principal scoped to exactly
+# {flux-system, prow, test-pods, ack-system}. So a RoleBinding to `admin` in those namespaces grants
+# NO NEW EFFECTIVE PRIVILEGE - it mirrors the access policy the EKS authorizer already honours, into
+# the authorizer that escalation prevention consults. One binding per namespace replaces the
+# open-ended list, and any future namespaced Role in those namespaces just works.
 #
-# Granting the `escalate` verb was the other option and is worse: it would let Argo CD
-# create a Role conferring anything at all, which is the opposite of scoping.
+# WHAT IS DELIBERATELY NOT DONE: binding cluster-admin. That would be a genuine expansion - Argo CD
+# holds no cluster-wide write on workloads today and only read on pods - it is what the header of
+# cluster-scoped-rbac.yaml records as refused, and it lands in prod when this merges. The
+# whack-a-mole it would save is now small: after this change only cluster-scoped grants and custom
+# resource types need explicit rules, and both are rare enough that explicitness is worth more than
+# brevity there.
 #
-# Each rule here must remain a superset of what the corresponding chart Role grants. If
-# a chart's Role gains a verb or resource, the matching rule below needs it too or the
-# sync fails the same way. The three chart Roles are, as of this commit:
+# WHAT STILL NEEDS EXPLICIT RULES:
+#   - custom resources, which `admin` does not aggregate: eks.services.k8s.aws/clusters,
+#     secrets-store.csi.x-k8s.io/secretproviderclasses, prow.k8s.io/prowjobs
+#   - the argocd namespace, which no access policy covers (AmazonEKSAdminPolicy excludes it and
+#     AmazonEKSArgoCDPolicy is the capability's own-operation grant), so it gets neither an admin
+#     binding nor free roles/rolebindings write
 #
-#   build-cluster-connection-read       ack-system   eks.services.k8s.aws/clusters get,list,watch
-#   build-cluster-connection-write      flux-system  configmaps get,create,update,patch
-#   build-cluster-connection-kubeconfig prow         configmaps get,create,update,patch
-#   build-cluster-connection-registrar  argocd       secrets    get,create,update,patch
-#                                       argocd       appprojects get,patch
-#                                       argocd       applications get,create,update,patch
-#
-# Reconciled by Flux, like cluster-scoped-rbac.yaml, for the same reason: Argo CD
-# cannot apply the object that authorises Argo CD. Phase 5 has to decide who owns both.
+# Reconciled by Flux, like cluster-scoped-rbac.yaml, for the same reason: Argo CD cannot apply the
+# object that authorises Argo CD. Phase 5 has to decide who owns both.
 ---
+# Namespaces where AmazonEKSAdminPolicy is already associated. The binding is the access policy,
+# restated where escalation prevention can see it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-namespace-admin
+  namespace: ack-system
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+# The group Terraform adds to the capability role's access entry. The entry's username is
+# session-templated and cannot serve as an RBAC subject, so a group is the only stable option -
+# see bootstrap/argocd-access.tf.
+- kind: Group
+  name: argocd-cluster-scoped
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-namespace-admin
+  namespace: prow
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+- kind: Group
+  name: argocd-cluster-scoped
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-namespace-admin
+  namespace: test-pods
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+- kind: Group
+  name: argocd-cluster-scoped
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-namespace-admin
+  namespace: flux-system
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+- kind: Group
+  name: argocd-cluster-scoped
+  apiGroup: rbac.authorization.k8s.io
+---
+# Custom resources, which the aggregated `admin` ClusterRole does not cover. One Role per namespace,
+# holding only CR types.
+#
+# ack-system: the connection Job's chart reads the build-cluster Cluster CR status.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -65,8 +133,6 @@ metadata:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 rules:
-# Matches build-cluster-connection-read. The connection Job reads the build-cluster
-# Cluster CR status to discover the endpoint and CA.
 - apiGroups: ["eks.services.k8s.aws"]
   resources: ["clusters"]
   verbs: ["get", "list", "watch"]
@@ -84,33 +150,34 @@ roleRef:
   kind: Role
   name: argocd-rbac-grantor
 subjects:
-# The group Terraform adds to the capability role's access entry. The entry's username
-# is session-templated and cannot serve as an RBAC subject, so a group is the only
-# stable option - see bootstrap/argocd-access.tf.
 - kind: Group
   name: argocd-cluster-scoped
   apiGroup: rbac.authorization.k8s.io
 ---
+# prow: the secrets path declares a SecretProviderClass here, and prow-config's Roles grant
+# prowjobs including `delete`, which the cluster-scoped rule deliberately omits - sinker deletes
+# ProwJobs, so the permission is real, but it is granted here rather than cluster-wide.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: argocd-rbac-grantor
-  namespace: flux-system
+  namespace: prow
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 rules:
-# Matches build-cluster-connection-write. The Job writes its intermediate ConfigMap
-# here. Not list/watch/delete: the chart Role does not grant them either.
-- apiGroups: [""]
-  resources: ["configmaps"]
+- apiGroups: ["secrets-store.csi.x-k8s.io"]
+  resources: ["secretproviderclasses"]
   verbs: ["get", "create", "update", "patch"]
+- apiGroups: ["prow.k8s.io"]
+  resources: ["prowjobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: argocd-rbac-grantor
-  namespace: flux-system
+  namespace: prow
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -123,34 +190,16 @@ subjects:
   name: argocd-cluster-scoped
   apiGroup: rbac.authorization.k8s.io
 ---
+# test-pods: the second SecretProviderClass. Job pods mount it via the CSI driver.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: argocd-rbac-grantor
-  namespace: prow
+  namespace: test-pods
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 rules:
-# Matches build-cluster-connection-kubeconfig. The Job writes build-cluster-kubeconfig
-# here, which crier, deck, sinker and prow-controller-manager mount.
-- apiGroups: [""]
-  resources: ["configmaps"]
-  verbs: ["get", "create", "update", "patch"]
-# For the `secrets` path (flux/secrets/secrets-provider.yaml), which declares a
-# SecretProviderClass here and another in test-pods.
-#
-# NOT an escalation-prevention rule - a SecretProviderClass is not an RBAC object, so nothing
-# is being granted through it. This is a plain permission Argo CD genuinely lacks:
-# AmazonEKSAdminPolicy mirrors the built-in admin ClusterRole, which is namespace-oriented and
-# excludes CRD INSTANCES, so Argo CD cannot write custom resources in a namespace even where it
-# is otherwise admin. ACK's CRs escape this via AmazonEKSACKPolicy; there is no equivalent
-# policy for secrets-store.csi.x-k8s.io. Confirmed with `kubectl auth can-i create
-# secretproviderclasses -n prow --as-group=argocd-cluster-scoped`: no.
-#
-# Required whichever way the `secrets` path's ClusterRole question is settled, so it lands
-# ahead of that decision. No delete: nothing here should be able to remove the object that
-# tells the CSI driver which AWS secrets to fetch.
 - apiGroups: ["secrets-store.csi.x-k8s.io"]
   resources: ["secretproviderclasses"]
   verbs: ["get", "create", "update", "patch"]
@@ -159,7 +208,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: argocd-rbac-grantor
-  namespace: prow
+  namespace: test-pods
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
@@ -172,6 +221,23 @@ subjects:
   name: argocd-cluster-scoped
   apiGroup: rbac.authorization.k8s.io
 ---
+# argocd: the one namespace no access policy covers, so nothing here comes for free.
+#
+# AmazonEKSAdminPolicy is scoped to {ack-system, prow, test-pods, flux-system} and excludes this
+# namespace; AmazonEKSArgoCDPolicy covers it but is the capability's own-operation grant, which reads
+# cluster registration Secrets rather than managing RBAC. So this namespace gets no admin binding and
+# needs both halves spelled out:
+#
+#   1. the ability to create roles and rolebindings at all. Elsewhere the admin binding provides it.
+#      Without it the failure is a plain "cannot create resource roles in API group
+#      rbac.authorization.k8s.io in the namespace argocd" - not an escalation error, and easy to
+#      mistake for one.
+#   2. holding whatever the created Role grants, so escalation prevention passes: the secrets,
+#      appprojects and applications rules below, matching build-cluster-connection-registrar.
+#
+# Granting roles/rolebindings write here does not let Argo CD widen its own access: escalation
+# prevention still caps any Role it creates at the permissions it already holds. `escalate` was the
+# other option and is worse - it would let Argo CD create a Role conferring anything at all.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -181,58 +247,20 @@ metadata:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
 rules:
-# Matches build-cluster-connection-registrar. The connection Job registers the build
-# cluster as an Argo CD spoke by writing a labelled cluster Secret here - which must
-# happen at runtime, since the build cluster is an ACK Cluster CR and Terraform must not
-# own a registration keyed to it (D13).
-#
-# This namespace is the one gap the associated access policies leave. AmazonEKSAdminPolicy
-# is scoped to {ack-system, prow, test-pods, flux-system} and does not include
-# argocd; AmazonEKSArgoCDPolicy covers argocd but is the capability's own-operation grant,
-# which reads cluster Secrets rather than managing RBAC.
-#
-# APPLYING A ROLE NEEDS TWO SEPARATE PERMISSIONS, and this namespace is the only one where
-# neither comes for free:
-#
-#   1. the ability to create roles and rolebindings at all, below. In the other three
-#      namespaces AmazonEKSAdminPolicy already grants this, which is why they need only the
-#      second rule. Without it the failure is a plain "cannot create resource roles in API
-#      group rbac.authorization.k8s.io in the namespace argocd" - not an escalation error,
-#      and easy to mistake for one.
-#
-#   2. holding whatever the created Role grants, so escalation prevention passes. That is
-#      the secrets rule below, matching build-cluster-connection-registrar.
-#
-# Granting roles/rolebindings write here does not let Argo CD widen its own access:
-# escalation prevention still caps any Role it creates at the permissions it already holds.
 - apiGroups: ["rbac.authorization.k8s.io"]
   resources: ["roles", "rolebindings"]
   verbs: ["get", "create", "update", "patch"]
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["get", "create", "update", "patch"]
-# The Job also appends the spoke to the AppProject's destinations. That is runtime work
-# for the same reason the registration is: a destination naming the build cluster is keyed
-# to a cluster ACK owns, so Terraform must not hold it (D13). Terraform declares only the
-# hub destination and ignores changes to the list.
-#
-# get and patch only - not create or delete. The AppProject is created and owned by
-# Terraform; the Job amends one field of it.
+# The connection Job appends the build cluster to the AppProject's destinations, and applies the
+# prow-build-cluster-resources Application. Both are runtime work because they name a cluster ACK
+# owns and Terraform must hold nothing keyed to it (D13). appprojects is get and patch only - the
+# AppProject is Terraform-owned and the Job amends one field - while applications needs create,
+# because the Job owns that object outright. No delete on either.
 - apiGroups: ["argoproj.io"]
   resources: ["appprojects"]
   verbs: ["get", "patch"]
-# The Job also applies the prow-build-cluster-resources Application. Runtime work for the
-# third time and for the same reason: its destination names the build cluster, so Terraform
-# must not declare it (D13). Terraform declares only Applications targeting the hub.
-#
-# Matches build-cluster-connection-registrar, which needs create here rather than just
-# patch: the Job owns that Application outright instead of amending one Terraform owns.
-# No delete, in either place.
-#
-# Note that Argo CD granting itself write on Applications is not a privilege increase -
-# AmazonEKSArgoCDPolicy already gives the capability full control of its own CRs in this
-# namespace. This rule exists only so the RBAC authorizer can see it, which is what
-# escalation prevention checks when Argo CD applies the chart's Role.
 - apiGroups: ["argoproj.io"]
   resources: ["applications"]
   verbs: ["get", "create", "update", "patch"]
@@ -242,45 +270,6 @@ kind: RoleBinding
 metadata:
   name: argocd-rbac-grantor
   namespace: argocd
-  annotations:
-    kustomize.toolkit.fluxcd.io/prune: disabled
-    helm.sh/resource-policy: keep
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: argocd-rbac-grantor
-subjects:
-- kind: Group
-  name: argocd-cluster-scoped
-  apiGroup: rbac.authorization.k8s.io
----
-# test-pods, for the second SecretProviderClass the `secrets` path declares
-# (flux/secrets/secrets-provider.yaml). Job pods mount it directly via the CSI driver to read
-# the GitHub PAT and the API-model knowledge-base id.
-#
-# Same reasoning as the secretproviderclasses rule in the prow namespace above: not escalation
-# prevention, just a permission AmazonEKSAdminPolicy withholds because it excludes CRD
-# instances. A separate Role because these grants are namespace-scoped by design - Argo CD
-# should be able to write SecretProviderClasses in the two namespaces that have them and
-# nowhere else.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: argocd-rbac-grantor
-  namespace: test-pods
-  annotations:
-    kustomize.toolkit.fluxcd.io/prune: disabled
-    helm.sh/resource-policy: keep
-rules:
-- apiGroups: ["secrets-store.csi.x-k8s.io"]
-  resources: ["secretproviderclasses"]
-  verbs: ["get", "create", "update", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: argocd-rbac-grantor
-  namespace: test-pods
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
