@@ -16,7 +16,7 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 | Cut over | **12** paths, all `automated`, prune off everywhere |
 | Wired, not live | **9** — `prow-config`, `prow-data-plane`, `prow-jobs`, `prow-plugins`, `prow-agent-workflows`, `prow-build-cluster-resources`, `prow-crds`, `prometheus-dashboards`, `secrets`. All verified against live objects; awaiting push, apply and cutover |
 | ACK CRs | 64, all Argo CD-tracked, 0 deleting |
-| Still on Flux, not started | **1** — `prometheus`, which needs an upstream chart source rather than a git path. See *What is left* |
+| Still on Flux, not started | **1** — `prometheus`. Blocked on a privilege decision, not on code: its chart's five ClusterRoles would need 112 further cluster-wide triples, which is cluster-admin by another name. See *What is left* |
 | Clusters registered | 2 — hub, plus the build cluster as a spoke |
 
 `Synced` was never progress on its own. An Application whose objects are all Helm hooks has
@@ -254,6 +254,64 @@ environment rather than the upstream names a reader would guess.
 Still note `reconcileStrategy: ChartVersion` on this HelmRelease: template edits are ignored until
 `Chart.yaml` `version` bumps (see Traps), which bites while iterating on the Flux side.
 
+### `prometheus`: migrating it as-is costs cluster-admin
+
+This was carried in the backlog as "an upstream chart source plus a values file, and probably a
+wider CRD exception". Both halves of that were wrong.
+
+**The CRDs are already covered.** `AmazonEKSKROPolicy` grants
+`apiextensions.k8s.io/customresourcedefinitions: *`, so all ten `monitoring.coreos.com` CRDs are
+fine, and escalation prevention does not apply to CRDs — they are not RBAC objects. Note that
+`kubectl auth can-i --as-group=argocd-cluster-scoped` reports `no` for CRDs anyway: access
+policies are enforced by the EKS authorizer and are invisible to a SubjectAccessReview. That is a
+limitation of the probe, not a gap, and it is worth remembering before reading any `can-i` result
+here as evidence.
+
+**The blocker is the chart's own RBAC.** Rendered with the live values, `kube-prometheus-stack`
+84.5.0 produces 125 objects including **five ClusterRoles**. Escalation prevention requires the
+applier to hold every rule in a ClusterRole it creates, and measured against what the RBAC
+authorizer can actually see — `flux/argocd/cluster-scoped-rbac.yaml`, not the access policies:
+
+| | |
+|---|---|
+| Argo CD holds today | 53 triples |
+| The five ClusterRoles need | 121 triples |
+| **Missing** | **112**, over **13 API groups** |
+| Of those, non-read | 47 triples over 35 resources |
+
+The missing set includes the `*` verb, and write on
+`mutatingwebhookconfigurations`/`validatingwebhookconfigurations` — which is its own escalation
+path, since whoever can write admission webhooks can intercept or mutate every API request in the
+cluster. `prometheus-kube-prometheus-operator` alone accounts for 57, `kube-state-metrics` for 50.
+
+Granting all 112 is not a bigger version of the `prow-plugins` or `secrets` decisions. It is
+`AmazonEKSClusterAdminPolicy` by another route — the exact thing the header of
+`cluster-scoped-rbac.yaml` records as refused. And it would be spent on the **least** critical path
+in the repo: monitoring, not Prow.
+
+Options, none of them free:
+
+1. **Disable RBAC creation in the chart and let Terraform own those five ClusterRoles.**
+   `rbac.create: false` on the subcharts, and Terraform — which is cluster-admin and hub-owned —
+   applies them. Argo CD then never applies an RBAC object for this path and needs no new grant.
+   Cost: 121 upstream rules copied into Terraform, to be re-synced on every chart upgrade, with
+   drift being silent.
+2. **Keep `prometheus` on Flux** and scope Flux removal to everything else. Honest, and cheap
+   today, but it means Flux never fully goes away, which was the point.
+3. **Replace the chart** with AWS-managed monitoring (AMP plus managed Grafana, or the EKS
+   observability add-on). Removes the problem, the 112 triples and the vendoring question at once,
+   and is the largest change.
+4. **Grant the 112.** Recorded for completeness. It makes the Argo CD capability role
+   cluster-admin in all but name, including admission-webhook write.
+
+Whichever is chosen, the mechanism questions that looked like the work here are secondary. For the
+record, since they were measured: the chart is 7.2 MB unpacked across 297 files and five subcharts,
+so vendoring it into `charts/` — the house pattern, per `charts/flux2-2.18.4` and
+`scripts/pull-flux-chart.sh` — is 12× the flux2 chart. The alternative, a multi-source Application
+with a `$values` ref, avoids vendoring but adds the repo's first multi-source Application, needs
+the Helm repo in the AppProject's `sourceRepos`, and assumes the managed capability's repo-server
+has egress to a third-party Helm repo, which is unverified. Vendoring depends on nothing but git.
+
 ### `secrets`: two gaps, and the second is not "read"
 
 Measured with `kubectl auth can-i --as-group=argocd-cluster-scoped`, which is the view the RBAC
@@ -327,7 +385,7 @@ on first sync, with no `ignoreDifferences` added pre-emptively, per the rule abo
 | ~~`prow-charts`~~ → ~~`prow-config`~~, ~~`prow-data-plane`~~ | **done.** The data-plane half was free; `prow-config` needed a chart change plus 12 parameters and no `values` block. See below |
 | ~~`prow-crds`, `prometheus-dashboards`~~ | **done.** Both were genuinely just an Application each — see below |
 | ~~`secrets`~~ | **done**, and it cost the widest grant in the migration. Take the exit condition — see below |
-| `prometheus` | zero tokens, and **not an Application either.** The path contains only a `HelmRepository` + `HelmRelease` for upstream `kube-prometheus-stack` 84.5.0, so migrating means an Application whose source is that Helm repo, which needs the repo added to the AppProject's `sourceRepos` (currently the GitHub repo only). Its ~200-line `values` block, including the Prow recording rules, has to go somewhere: the clean route is a multi-source Application with a `$values` ref at `flux/prometheus/values.yaml`, which nothing else here uses. It also installs many CRDs, so the `prow-crds` in-cluster exception probably has to widen |
+| `prometheus` | **the only path left, and it is not a mechanism problem.** Migrating it as-is would make Argo CD effectively cluster-admin. Measured below; needs a decision, not code |
 | Phase 5 deletions | `flux/flux` (Flux itself, 5 tokens), `flux/prow/version`, `flux/prow/build-cluster-kubeconfig`, the root `test-infra` Kustomization, `self-managed-vars`. `flux/argocd/` is the exception: it must survive and needs a new owner, since Argo CD cannot apply the objects that authorise Argo CD |
 | `prow-build-cluster-resources` | chart written and Application declared; **needs push, apply and cutover**, none of which has happened. See below |
 
