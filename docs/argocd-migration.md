@@ -230,6 +230,38 @@ per-environment scalars to Terraform. Note `reconcileStrategy: ChartVersion` on 
 template edits are ignored until `Chart.yaml` `version` bumps (see Traps), which will bite while
 iterating on the Flux side.
 
+### `secrets`: two gaps, and the second is not "read"
+
+Measured with `kubectl auth can-i --as-group=argocd-cluster-scoped`, which is the view the RBAC
+authorizer has. Both gaps returned `no` on every probe.
+
+**Gap 1, done.** The path declares a `SecretProviderClass` in `prow` and another in `test-pods`,
+and Argo CD could not write either. This is *not* escalation prevention — an SPC is not an RBAC
+object — it is a plain permission `AmazonEKSAdminPolicy` withholds, because it mirrors the
+built-in `admin` ClusterRole and that excludes **CRD instances**. ACK's CRs escape this via
+`AmazonEKSACKPolicy`; there is no equivalent for `secrets-store.csi.x-k8s.io`. Granted narrowly:
+`get,create,update,patch` on `secretproviderclasses` in exactly those two namespaces, no
+`delete`. Required whichever way gap 2 is settled, so it landed ahead of the decision.
+
+**Gap 2, open, and worth stating precisely because the shorthand is misleading.**
+`secrets-store-rbac.yaml` is a ClusterRole granting `secrets`
+**create, delete, get, list, patch, update, watch** cluster-wide. Escalation prevention requires
+the applier to hold *every* rule in a ClusterRole it creates, so enabling this path by granting
+means giving Argo CD all seven verbs on every Secret in the cluster — not read access. Read plus
+write plus delete, cluster-wide. That is a different proposition from the `prow-plugins` grant
+(ProwJob write and pod read) and from anything else in this migration.
+
+The narrowing alternative is unusually cheap here, and the numbers are now measured rather than
+assumed: the ClusterRoleBinding's only subject is the single `secrets-store-csi-driver`
+ServiceAccount in `aws-secrets-manager`, and the only SecretProviderClasses in the cluster are
+`prow/prow-secrets` and `test-pods/prow-secrets`. So the driver needs to write Secrets in two
+namespaces, not all of them, and two namespaced Roles would remove the escalation problem
+entirely — Argo CD would then need only namespaced secrets write, which `AmazonEKSAdminPolicy`
+already grants it in both.
+
+Whoever settles this should also weigh that cluster-wide Secret read makes the Argo CD capability
+role a path to every credential in the cluster, including ones this repo does not own.
+
 ### The token-free paths need no conversion at all
 
 `prow-crds` and `prometheus-dashboards` are now wired, and they are the first paths that
@@ -265,7 +297,7 @@ on first sync, with no `ignoreDifferences` added pre-emptively, per the rule abo
 | ~~`prow-data-plane`~~ | **done**, and it was free: zero tokens, and its eight values were one static string repeated, now chart defaults. See below |
 | `prow-charts` → `prow-config` | the last real conversion, and **not** the value-mapping exercise it looked like. See below |
 | ~~`prow-crds`, `prometheus-dashboards`~~ | **done.** Both were genuinely just an Application each — see below |
-| `secrets` | zero tokens, but **not** cheap. `secrets-store-rbac.yaml` is a ClusterRole granting `secrets` create/delete/get/list/patch/update/watch **cluster-wide**, plus its binding. Escalation prevention means Argo CD must hold that itself to create it, and cluster-wide secrets write is a materially bigger grant than the `prow-plugins` one — it is read access to every Secret in the cluster. The narrowing option is much more attractive here: the binding's only subject is the `secrets-store-csi-driver` ServiceAccount, so scope it to the namespaces that actually need it. Do not repeat the `prow-plugins` decision by reflex |
+| `secrets` | zero tokens, **two** gaps, one of them the largest grant in the migration. The SecretProviderClass half is done. The ClusterRole half is **awaiting a decision** — see below |
 | `prometheus` | zero tokens, and **not an Application either.** The path contains only a `HelmRepository` + `HelmRelease` for upstream `kube-prometheus-stack` 84.5.0, so migrating means an Application whose source is that Helm repo, which needs the repo added to the AppProject's `sourceRepos` (currently the GitHub repo only). Its ~200-line `values` block, including the Prow recording rules, has to go somewhere: the clean route is a multi-source Application with a `$values` ref at `flux/prometheus/values.yaml`, which nothing else here uses. It also installs many CRDs, so the `prow-crds` in-cluster exception probably has to widen |
 | Phase 5 deletions | `flux/flux` (Flux itself, 5 tokens), `flux/prow/version`, `flux/prow/build-cluster-kubeconfig`, the root `test-infra` Kustomization, `self-managed-vars`. `flux/argocd/` is the exception: it must survive and needs a new owner, since Argo CD cannot apply the objects that authorise Argo CD |
 | `prow-build-cluster-resources` | chart written and Application declared; **needs push, apply and cutover**, none of which has happened. See below |

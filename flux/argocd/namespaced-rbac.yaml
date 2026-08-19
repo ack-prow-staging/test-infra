@@ -137,6 +137,23 @@ rules:
 - apiGroups: [""]
   resources: ["configmaps"]
   verbs: ["get", "create", "update", "patch"]
+# For the `secrets` path (flux/secrets/secrets-provider.yaml), which declares a
+# SecretProviderClass here and another in test-pods.
+#
+# NOT an escalation-prevention rule - a SecretProviderClass is not an RBAC object, so nothing
+# is being granted through it. This is a plain permission Argo CD genuinely lacks:
+# AmazonEKSAdminPolicy mirrors the built-in admin ClusterRole, which is namespace-oriented and
+# excludes CRD INSTANCES, so Argo CD cannot write custom resources in a namespace even where it
+# is otherwise admin. ACK's CRs escape this via AmazonEKSACKPolicy; there is no equivalent
+# policy for secrets-store.csi.x-k8s.io. Confirmed with `kubectl auth can-i create
+# secretproviderclasses -n prow --as-group=argocd-cluster-scoped`: no.
+#
+# Required whichever way the `secrets` path's ClusterRole question is settled, so it lands
+# ahead of that decision. No delete: nothing here should be able to remove the object that
+# tells the CSI driver which AWS secrets to fetch.
+- apiGroups: ["secrets-store.csi.x-k8s.io"]
+  resources: ["secretproviderclasses"]
+  verbs: ["get", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -225,6 +242,45 @@ kind: RoleBinding
 metadata:
   name: argocd-rbac-grantor
   namespace: argocd
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argocd-rbac-grantor
+subjects:
+- kind: Group
+  name: argocd-cluster-scoped
+  apiGroup: rbac.authorization.k8s.io
+---
+# test-pods, for the second SecretProviderClass the `secrets` path declares
+# (flux/secrets/secrets-provider.yaml). Job pods mount it directly via the CSI driver to read
+# the GitHub PAT and the API-model knowledge-base id.
+#
+# Same reasoning as the secretproviderclasses rule in the prow namespace above: not escalation
+# prevention, just a permission AmazonEKSAdminPolicy withholds because it excludes CRD
+# instances. A separate Role because these grants are namespace-scoped by design - Argo CD
+# should be able to write SecretProviderClasses in the two namespaces that have them and
+# nowhere else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-rbac-grantor
+  namespace: test-pods
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+rules:
+- apiGroups: ["secrets-store.csi.x-k8s.io"]
+  resources: ["secretproviderclasses"]
+  verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-rbac-grantor
+  namespace: test-pods
   annotations:
     kustomize.toolkit.fluxcd.io/prune: disabled
     helm.sh/resource-policy: keep
