@@ -200,6 +200,36 @@ locals {
       # desired state cannot fight ACK or overwrite someone mid-diagnosis of AWS state.
       self_heal = true
     }
+    prow-agent-workflows = {
+      # First of the three generated paths to convert, and the smallest: one ConfigMap, two
+      # tokens, no workload objects.
+      #
+      # The chart is IN prow/agent-workflows/, not under flux/prow/charts/ with the others,
+      # because .Files.Get is chart-rooted and that is the only layout where the chart can
+      # read the generated agent-workflows.yaml from git. The alternative - Terraform
+      # reading it with file() and passing the content, as the build-cluster test_config
+      # does - would mean `make prow-gen` had no effect until someone also ran terraform
+      # apply. Workflow definitions belong to git, so git is what Argo CD reads and
+      # Terraform supplies only the two scalars below.
+      #
+      # The generated file keeps its ${TOKEN} placeholders and the generator is untouched.
+      # Those placeholders are how every stage gets per-environment values, and the stages
+      # still on Flux resolve them via postBuild; emitting Helm actions instead would break
+      # them on merge and would rewrite all seven generated files, since the generator
+      # restamps a timestamp on every run. The chart resolves the two tokens with `replace`
+      # and fails the render if an unrecognised one appears.
+      #
+      # kustomization.yaml stays in place for those stages. It and this chart read the same
+      # file and produce the same object, verified byte-identical against the live
+      # ConfigMap, so the two reconcilers cannot disagree about content.
+      path             = "prow/agent-workflows"
+      target_namespace = "prow"
+      values           = ["prowImagesRepoUri", "testInfraOrg"]
+
+      # NOT cut over. Manual sync until the first sync confirms the ConfigMap kept its uid;
+      # kustomize-controller still owns it via the prow-agent-workflows Kustomization, whose
+      # prune is now false (D19-P1) so removing that path later will not delete the object.
+    }
     prow-mirror = {
       path             = "flux/prow/charts/prow-mirror"
       target_namespace = "test-pods"
