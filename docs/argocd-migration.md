@@ -186,8 +186,8 @@ and all ten objects (five Roles, five RoleBindings in `test-pods`) match live co
 change is inert for stages still on Flux, which keep passing the same values explicitly. The
 Application needs no `values`, and therefore no `helm` block.
 
-**`prow-config` is the one piece of real work left, and the obvious approach does not work.**
-Its 25 token occurrences are not 25 independent values:
+**`prow-config`: the chart half is done, the value-mapping half is not.** Its 25 token
+occurrences were never 25 independent values:
 
 | token | count | what it is |
 |---|---|---|
@@ -195,20 +195,40 @@ Its 25 token occurrences are not 25 independent values:
 | `STACK_NAME` ×3, `PROW_DOMAIN` ×2, `PUBLISH_ACCOUNT_ID` ×2 | 7 | bucket names, ingress hostname, ECR reader role |
 | `CONTROLLER_ECR_REGISTRY`, `KUBERNETES_ORG`, `REDHAT_ORG`, `STAGE`, `TEST_INFRA_ORG` | 1 each | plain scalars |
 
-Terraform cannot simply pass the 13 image strings as parameters, because it cannot compose them:
-`PROW_VERSION` and `PROW_PATCH_REVISION` are git-authored, live in
-`flux/prow/version/prow-version-configmap.yaml`, and are deliberately **not** Terraform's to
-know — that is the `prow-mirror` precedent, which this repo has now applied three times. So the
-composition has to move **into the `prow/config` chart**: it takes `accountId`, `region`,
-`prowVersion` and `prowPatchRevision` and builds the 13 references itself, with the two version
-values as chart defaults.
+Terraform cannot pass those 13 as parameters, because it cannot compose them: `PROW_VERSION` and
+`PROW_PATCH_REVISION` are git-authored, live in `flux/prow/version/prow-version-configmap.yaml`,
+and are deliberately **not** Terraform's to know — the `prow-mirror` precedent, now applied four
+times. Nothing outside the chart holds all four inputs, so nothing outside the chart can build
+the string.
 
-That is a change to the chart that renders Prow's ten components — deck, hook, tide, plank,
-crier, sinker, horologium, statusreconciler, ghproxy and the utility images. It is mechanical but
-it is the highest-blast-radius chart in the repo, so it wants its own session and a careful
-byte-comparison against the live Deployments, not the tail of another change. Note also
-`reconcileStrategy: ChartVersion` on this HelmRelease: template edits are ignored until
-`Chart.yaml` `version` bumps (see Traps), which will bite while iterating.
+**So the composition moved into the chart, and that part is done.** `prow/config` gained an
+`imageMirror` block (`accountId`, `region` per-environment; `prowVersion`,
+`prowPatchRevision` as git-authored defaults) and a `prow-config.image` helper. Each of the 13
+sites now resolves an explicit override *or* composes. Proven behaviour-preserving three ways:
+rendering with the HelmRelease's values is byte-identical to the previous chart, rendering with
+`imageMirror` and no explicit images produces the same manifests, and all nine composed component
+references match the live Deployment images exactly.
+
+Two things that bit while doing it, both worth keeping:
+
+- **`default` does not short-circuit.** `.Values.x.image | default (include "…")` evaluates the
+  `include` eagerly, so the composition ran even when an override was set and its `required`
+  calls failed on `imageMirror` values a Flux render has no reason to supply. The override is
+  resolved *inside* the helper instead.
+- **`toString` on every input.** A 12-digit AWS account id written unquoted in a values file is
+  read as a float, and `printf %s` then yields `%!s(float64=8.6987147623e+10)` — a syntactically
+  valid image reference that fails at pull time rather than at render time. Argo CD parameters
+  and `--set` both keep it a string; a hand-written values file is what this guards.
+
+What remains for `prow-config` is only the value mapping, and one detail decides its shape: the
+ingress annotations contain JSON with commas (`alb.ingress.kubernetes.io/actions.ssl-redirect`),
+which `--set` misparses, so this Application needs a `helm.values` block and not just
+parameters — the mechanism already used for `prow-build-cluster-connection`. The static parts
+(ingress annotations, `github.bot`, `buildCluster.enabled`/`name`, `scrapeMetrics`, serviceAccount
+names) should follow the same rule as everything else and become chart defaults, leaving only the
+per-environment scalars to Terraform. Note `reconcileStrategy: ChartVersion` on this HelmRelease:
+template edits are ignored until `Chart.yaml` `version` bumps (see Traps), which will bite while
+iterating on the Flux side.
 
 ### The token-free paths need no conversion at all
 
