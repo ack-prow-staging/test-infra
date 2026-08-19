@@ -9,7 +9,14 @@ spec:
     kind: GitRepository
     name: test-infra
   path: ./prow/plugins/deployments
-  prune: true
+  # prune disabled ahead of the chart conversion: converting this path makes the raw
+  # objects stale, and prune deletes stale objects. Must be live BEFORE the content
+  # change, not alongside it (D19-P1) - which is why this is its own commit.
+  #
+  # The cost is that a removed object is no longer garbage-collected here, the same trade
+  # every other converted path already made. What it buys is that the Deployment, Service
+  # and RBAC keep running when the raw manifests stop being rendered.
+  prune: false
   postBuild:
     substituteFrom:
     - kind: ConfigMap
