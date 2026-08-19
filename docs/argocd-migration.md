@@ -11,13 +11,14 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 
 | | |
 |---|---|
-| Kustomizations / HelmReleases | 25 Kustomizations (6 suspended), 16 HelmReleases (14 suspended). Every unsuspended one is Ready. The suspended `prow-build-cluster-resources` reads `Ready=False / DependencyNotReady` — a condition frozen at the moment of suspension, not a live fault; suspension stops reconciliation, it does not clear status |
+| Kustomizations / HelmReleases | 24 Kustomizations (6 suspended), 16 HelmReleases (14 suspended). Every unsuspended one is Ready. The suspended `prow-build-cluster-resources` reads `Ready=False / DependencyNotReady` — a condition frozen at the moment of suspension, not a live fault; suspension stops reconciliation, it does not clear status |
 | Argo CD Applications | **20, all Synced/Healthy, all `automated`.** 19 Terraform-declared and hub-targeted; the 20th, `prow-build-cluster-resources`, composed by the connection chart and applied by its Job at runtime (D13) |
 | Cut over | **all 20 paths.** The migration is done on staging; every path is Argo CD-reconciled |
 | Deleted, not migrated | **2** — the Prow Grafana dashboards with their recording rules (unmaintained since 2021), and `kube-prometheus-stack` itself (no reachable Grafana, alerts routed to `"null"`, and migrating it would have cost Argo CD cluster-admin) |
 | uid preservation | **78 of 79 objects adopted in place.** The one exception is the `job-config-substitutor` Job, recreated by design via `Force=true,Replace=true` past its immutable `spec.template` |
 | Branch state | `feat/argocd-migration-clean` deployed to staging and cut over. Terraform applied targeted at the Applications and the access-policy association |
 | `prometheus` teardown | complete. The namespace and all 10 `monitoring.coreos.com` CRDs are deleted; see below for what Flux left behind and why it had to be done by hand |
+| Argo CD's own RBAC | Terraform's, in `bootstrap/argocd-rbac.tf`. 14 objects adopted by import, uids held, and `terraform plan` is a clean no-op so drift detection means something |
 | Clusters registered | 2 — hub, plus the build cluster as a spoke |
 
 `Synced` was never progress on its own. An Application whose objects are all Helm hooks has
