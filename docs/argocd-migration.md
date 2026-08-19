@@ -1022,7 +1022,7 @@ The generalisable point: **a path converted from a Kustomization that applied bo
 and raw manifests is only half converted.** Check `resources:` in the old
 `kustomization.yaml` against what the chart contains, not just that the chart renders.
 
-### `flux-system` outlives Flux, and Prow never depended on it
+### `flux-system` holds nothing but Flux now
 
 Phase 5 looked like it needed a decision here: this document claimed the connection Job writes
 `build-cluster-kubeconfig` into `flux-system` and that Prow's components mount it from there,
@@ -1030,31 +1030,61 @@ which would have forced either a move or a vestigial namespace. **The claim was 
 just imprecise** - a ConfigMap mount is namespace-local, so a pod in `prow` cannot mount from
 `flux-system` at all. Measured: `build-cluster-kubeconfig` is in **`prow`**, written there by the
 Job, and that is what crier, deck, sinker and prow-controller-manager mount. The `flux-system`
-copy is `build-cluster-flux-kubeconfig`, a different object, used only by kustomize-controller's
-`kubeConfig.configMapRef` for remote apply - and it dies with Flux.
+copy is `build-cluster-flux-kubeconfig`, a different object from a different chart
+(`prow-build-cluster-kubeconfig`), used only by kustomize-controller's `kubeConfig.configMapRef`
+for remote apply - and its only consumer, the `prow-build-cluster-resources` Kustomization, is
+already suspended. That path is dead weight that is still being reconciled.
 
-So nothing Prow needs is in `flux-system`, and no move is required. The namespace still has to
-survive, for a simpler reason: **`prow-build-cluster-connection` deploys 11 objects into it** -
-a ServiceAccount, four Role/RoleBinding pairs, the Job, and the composed
-`build-cluster-resources-application` ConfigMap - and that path outlives Flux (D16).
+**Then the harder question: was any of `prow-build-cluster-connection` Flux wiring?** It lived in
+`flux-system`, so it looked like it. It is not. The Job does three things: assembles the
+kubeconfig Prow mounts, which is a **Prow** requirement under either reconciler; registers the
+build cluster as an Argo CD **spoke**; and authorises it in the AppProject then applies its
+Application. The last two exist only *because* of Argo CD. Nothing it does is Flux's.
 
-**Decision: keep the namespace, keep the name.** Terraform already creates it via
-`null_resource.flux_system_namespace`, so it needs no new owner. Retargeting the connection chart
-elsewhere was considered and rejected: it would recreate a Job and four RBAC pairs in a new
-namespace and force a re-verification of the whole build-cluster registration path - the most
-fragile chart in the repo, the one that OOMed and that taught us an in-flight operation is pinned
-to its revision - to buy nothing but a tidier name. A namespace called `flux-system` with no Flux
-in it is a documentation problem, not an operational one.
+Checking that took reading `managedFields` rather than labels. The mounted ConfigMap carries
+`helm.toolkit.fluxcd.io/name: prow-config`, which reads as though prow-config still owns it - but
+the field managers show `helm-controller` at 02:41 and `kubectl-client-side-apply` at 07:44, and
+the later write is the Job. prow-config's template is gated on `buildCluster.server`, which
+nothing sets any more, so the labels are residue from before D16.
+
+**So the chart moved to `ack-system`, and an earlier version of this section recommended the
+opposite.** That recommendation was made before establishing that none of the chart is Flux's,
+and it argued the move bought only a tidier name. It buys more than that: leaving it there means
+a namespace named after a reconciler that no longer exists holding the chart that replaced it.
+`ack-system` is where the Cluster CR the Job reads already lives, and it is already in
+`argocd_hub_namespaces`, so the admin RoleBinding covers creating the Roles with no new grant.
+
+Three things made the move safe rather than a rewrite:
+
+- **The chart now uses `.Release.Namespace`** for its own objects, with the `ack-system`, `prow`
+  and `argocd` references left literal, because those name where the TARGET objects live rather
+  than where the chart is installed. Rendering with `targetNamespace: flux-system` is unchanged,
+  so stages still on Flux are untouched and this is hub-only.
+- **A vestigial ConfigMap went with it.** The chart also wrote `build-cluster-connection` in its
+  own namespace so `prow-charts` could substitute `BUILD_CLUSTER_ENDPOINT` / `BUILD_CLUSTER_CA` at
+  render time. Argo CD cannot substitute, which is why the Job assembles the finished kubeconfig -
+  so that ConfigMap had no reader. `flux/prow.yaml` already recorded the substitution being
+  removed. It and its Role are deleted.
+- **The Job is idempotent, which is what made a namespace change survivable.** Re-run from
+  `ack-system` it reported `unchanged` for all three objects it owns - the kubeconfig, the spoke
+  Secret and the Application - and `already authorises` for the AppProject. Verified after: Prow's
+  ten Deployments available, the build cluster reachable, `prow-build-cluster-resources` still
+  Synced against the spoke.
+
+Moving a namespace is a **recreate, not an adoption** - new namespace means new object identity -
+so the six objects left in `flux-system` were orphaned rather than pruned, `prune` being off, and
+deleted by hand. `flux-system` now holds only Flux's own machinery plus the Terraform-owned
+`argocd-namespace-admin` RoleBinding, which is the next thing that can go: with nothing Argo CD
+manages in that namespace, `flux-system` can come out of `argocd_hub_namespaces` and narrow the
+access policy. Worth knowing that change **replaces** the access-policy association rather than
+updating it, so syncs in flight fail and retry.
 
 **One orphan found and removed while checking this.** `Role`/`RoleBinding` `argocd-rbac-grantor`
 in `flux-system`, still labelled `kustomize.toolkit.fluxcd.io/name: argocd-rbac` from the deleted
 Flux path, managed by nothing: `argocd-rbac.tf` grants grantor Roles in `{ack-system, prow,
 test-pods, argocd}` and not there. It granted `configmaps get/create/update/patch`, which the
 built-in `admin` ClusterRole already covers - verified by reading `admin`'s own rules rather than
-by probing, since a `can-i` probe could not tell which binding was answering. Deleted, then
-confirmed the grant still resolves and that `prow-build-cluster-connection` still syncs, since it
-creates four Roles in that namespace and escalation prevention requires Argo CD to hold what they
-grant.
+by probing, since a `can-i` probe cannot say which binding answered.
 
 The generalisable point, and the second time this migration has produced it: **deleting a path
 from git does not delete what it applied.** `prune: false` is what makes cutover reversible, and
