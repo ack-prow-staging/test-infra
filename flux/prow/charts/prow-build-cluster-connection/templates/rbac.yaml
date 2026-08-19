@@ -94,3 +94,41 @@ subjects:
 - kind: ServiceAccount
   name: build-cluster-connection
   namespace: flux-system
+---
+# Register the build cluster as an Argo CD spoke by writing a labelled cluster Secret in
+# the argocd namespace. Scoped to secrets in argocd only.
+#
+# This has to happen at runtime rather than in Terraform. The build cluster is an ACK
+# Cluster CR, so Terraform owning a registration keyed to it recreates the coupling D13
+# had to unpick: on a fresh bootstrap Terraform would register a destination before the
+# cluster existed, and on destroy it would remove the registration while Applications
+# still referenced it. The Job already reads that CR, so it is the natural place.
+#
+# Argo CD can only apply this Role because flux/argocd/namespaced-rbac.yaml grants the
+# capability the same permission in this namespace. argocd is the one namespace the
+# associated access policies leave uncovered - AmazonEKSAdminPolicy excludes it, and
+# AmazonEKSArgoCDPolicy is the capability's own-operation grant. Without that grantor rule
+# escalation prevention refuses this object.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: build-cluster-connection-registrar
+  namespace: argocd
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: build-cluster-connection-registrar
+  namespace: argocd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: build-cluster-connection-registrar
+subjects:
+- kind: ServiceAccount
+  name: build-cluster-connection
+  namespace: flux-system

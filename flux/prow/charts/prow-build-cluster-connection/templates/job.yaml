@@ -124,6 +124,44 @@ spec:
             | kubectl apply -f -
 
           echo "build-cluster-kubeconfig ConfigMap updated."
+
+          # Register the build cluster as an Argo CD spoke.
+          #
+          # Argo CD discovers target clusters from labelled Secrets in its own namespace.
+          # This one is written at runtime, not by Terraform: the build cluster is an ACK
+          # Cluster CR, so a Terraform-owned registration keyed to it would be created
+          # before the cluster exists on a fresh bootstrap, and removed while Applications
+          # still reference it on destroy (D13).
+          #
+          # server MUST be the cluster ARN. API server URLs are not accepted by the managed
+          # capability, and a URL would also fail to match the AppProject destination -
+          # which rejects the Application outright rather than failing at sync.
+          #
+          # Read from the CR status rather than built from stackName, even though the ARN
+          # is deterministic: reading it proves the cluster exists and is reconciled before
+          # anything is registered. Registering a spoke Argo CD cannot reach is worse than
+          # not registering one.
+          #
+          # No credentials are stored. The capability authenticates as its own role, which
+          # holds a cluster-admin access entry on the build cluster
+          # (argocd-build-cluster-access, in the ack-build-infra chart). Without that entry
+          # this Secret would register an unreachable cluster.
+          ARN=$(kubectl -n "$CR_NS" get cluster.eks.services.k8s.aws "$CR" \
+                  -o jsonpath='{.status.ackResourceMetadata.arn}')
+          if [ -z "$ARN" ]; then
+            echo "ERROR: build-cluster ARN empty - refusing to register an unreachable spoke" >&2
+            exit 1
+          fi
+          echo "  arn: $ARN"
+          kubectl create secret generic build-cluster -n argocd \
+            --from-literal=name="{{ $stackName }}-build-cluster" \
+            --from-literal=server="$ARN" \
+            --from-literal=project="test-infra" \
+            --dry-run=client -o yaml \
+            | kubectl label --local -f - -o yaml \
+                argocd.argoproj.io/secret-type=cluster \
+            | kubectl apply -f -
+          echo "build cluster registered as an Argo CD spoke."
         resources:
           requests:
             cpu: "50m"
