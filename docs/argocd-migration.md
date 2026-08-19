@@ -211,7 +211,7 @@ Nothing below is blocked on analysis; each item is work.
 | **Flux removal** | the point of all this. `flux/flux`, `flux/prow/version`, `flux/prow/build-cluster-kubeconfig`, the root `test-infra` Kustomization, `self-managed-vars`, and the now-redundant raw manifests under `flux/prow/build-cluster-resources/`. Also the six suspended Kustomizations and fourteen suspended HelmReleases, which exist only as reversal switches — deleting them is what makes the cutover irreversible, so it goes last |
 | dev and prod | this is staging only. The same branch drives all three, so each needs its own `terraform apply` and its own cutover, and prod deserves more care than the eight syncs took here |
 | the `secrets` grant's exit condition | narrow the CSI driver's ClusterRole to namespaced Roles, then delete the cluster-wide secrets rule outright. Written up beside the rule |
-| `ack-system` and `flux-system` are created by a script, not a resource | **Correcting an earlier claim in this doc that they had no owner: they do.** `null_resource.ack_system_namespace` and `null_resource.flux_system_namespace` each run `bootstrap/scripts/bootstrap-namespaces.sh`, which does `kubectl create namespace` if absent - which is why the live namespaces' only field manager is `kubectl-create`, and why they carry no Flux labels and no `eks-capability` manager like `argocd` does. So a fresh bootstrap does create them. What is left is smaller and real: nothing orders those provisioners against `kubernetes_manifest.argocd_root`, so on a fresh bootstrap wave 0 can sync before `ack-system` exists and fail on a missing namespace (`CreateNamespace=false` everywhere). Argo CD retries, so it self-corrects, but it looks like a broken bootstrap. A `depends_on` from the root Application to both provisioners removes the race |
+| a fresh bootstrap has one ordering race left | `ack-system` and `flux-system` are created by `null_resource.{ack,flux}_system_namespace` running `bootstrap-namespaces.sh`, so they do exist - but nothing orders those provisioners against `kubernetes_manifest.argocd_root`, so wave 0 can sync before `ack-system` exists and fail on a missing namespace. Argo CD retries, so it self-corrects and only looks broken. A `depends_on` from the root Application to both provisioners removes it. The `prow`/`test-pods` half of this is fixed: they are now `prow/namespaces` at wave 0 |
 | `periodics_enabled` | declared in no variable and plumbed nowhere; `jobs_config.yaml` commits `true` for every environment. Found while converting `prow-jobs`, unrelated to the migration |
 
 ## How each path was converted
@@ -979,6 +979,48 @@ declared, so 17 paths would have quietly stopped reconciling.
 `prow-build-cluster-resources` is the one Application still rendered with
 `prune: false, selfHeal: false`, and it is fine: its composed manifest is applied by the
 connection Job with `kubectl`, not by Argo CD, so it never passes through that serialiser.
+
+### The conversion left seven objects with no owner, and Flux was hiding it
+
+Found by asking whether Flux could simply be deleted. It could not. Beyond Flux's own
+machinery, the `prow` and `test-pods` Namespaces and the five ServiceAccounts every
+`PodIdentityAssociation` binds to were owned by **nothing that survives Flux**.
+
+They live in `prow-namespaces.yaml`, which Flux applied as a raw manifest *alongside* the
+`ack-pod-identities` chart rather than inside it, for a reason worth preserving:
+
+> no chart may own a Namespace: if Helm ever uninstalled or rolled back the release it would
+> target the namespace, and deleting a namespace cascades to everything inside it, including
+> all of Prow
+
+That reasoning is sound, and the chart conversion respected it — but the Argo CD Application
+points at the chart, so nothing replaced the raw manifest. The objects survived only because
+`prune` is disabled on the Flux side. **On a fresh bootstrap they would never have existed at
+all**: Argo CD would deploy six PodIdentityAssociations naming ServiceAccounts that do not
+exist, into namespaces that do not exist, with `CreateNamespace=false` everywhere.
+
+**This also corrects the wave derivation recorded above.** It justified the wave-3 edge with
+"ack-pod-identities creates the prow and test-pods namespaces", which is true of the Flux
+*Kustomization* and false of the Argo CD *Application*. The edge was necessary and
+insufficient: later waves were ordered behind something that never delivered the namespaces.
+
+Fixed by moving the manifest to `prow/namespaces/` with its own Application at **wave 0**,
+ahead of everything. Still a plain kustomize directory, not a chart — the same reasoning that
+kept it out of one still applies, and it is token-free so Argo CD reads it unchanged. It sits
+under `prow/` rather than `flux/` because everything under `flux/` is deleted in Phase 5 and
+these objects outlive it. Dropping it from the Flux kustomization was the cutover; `prune`
+stays false, so all seven were adopted with uids held — which mattered more here than
+anywhere else, since recreating a Namespace cascades to everything inside it.
+
+It needed one new cluster-scoped grant, `namespaces` **without delete**. Namespaces are
+cluster-scoped, so no namespace-scoped access policy reaches them: `AmazonEKSAdminPolicy` is
+associated per namespace and cannot grant creating one. Argo CD needs to create these and
+reconcile their labels, never to remove one, and `delete` was verified still denied after the
+grant landed.
+
+The generalisable point: **a path converted from a Kustomization that applied both a chart
+and raw manifests is only half converted.** Check `resources:` in the old
+`kustomization.yaml` against what the chart contains, not just that the chart renders.
 
 ## Rules cited in code comments
 
