@@ -946,6 +946,40 @@ Teardown is scripted (`bootstrap/scripts/cleanup-argocd-resources.sh`): drain fi
 `automated`, delete Applications with `--cascade=orphan` so Terraform tears down AWS, not
 Argo CD pruning.
 
+### `syncPolicy.automated` has exactly one shape a rendered manifest can hold
+
+Found by cleaning up the branch history and re-syncing: the root reported
+`Application.argoproj.io "secrets" is invalid: spec.syncPolicy.automated: Invalid value:
+"null": ... must be of type object`, and sat in retry.
+
+Argo CD parses a rendered Application into its typed Go struct and re-serialises it with
+`omitempty` before applying. That makes three of the four obvious shapes unstable:
+
+| rendered | what Argo CD applies | result |
+|---|---|---|
+| `{prune: false, selfHeal: false}` | `null` | CRD rejects it; the root retries forever |
+| `{}` | `null` | same |
+| `{prune: false, selfHeal: true}` | `{selfHeal: true}` | applies, but rendered `prune` can never match live, so the child is **permanently OutOfSync** |
+| `{enabled: true}` | `{enabled: true}` | stable |
+
+`enabled` is a `*bool`, so a non-nil `true` survives `omitempty`. It states what the other
+shapes could only imply, and `prune`/`selfHeal` keep their false defaults by absence.
+
+**The API server was never the constraint.** All four shapes round-trip unchanged through
+`kubectl apply --server-side`, which is what made this confusing — the rejection only
+appears when Argo CD is the applier. Test the applier you actually use.
+
+Two things this explains in passing. The 13 Applications still carrying
+`prune: false, selfHeal: false` alongside `enabled: true` got those fields from Terraform's
+field manager, and Argo CD has never been able to re-apply them; they are inert and
+identical in effect. And a bare `automated:` key with nothing under it is worse than either
+- it renders as `automated: null`, which **disables** auto-sync while still looking
+declared, so 17 paths would have quietly stopped reconciling.
+
+`prow-build-cluster-resources` is the one Application still rendered with
+`prune: false, selfHeal: false`, and it is fine: its composed manifest is applied by the
+connection Job with `kubectl`, not by Argo CD, so it never passes through that serialiser.
+
 ## Rules cited in code comments
 
 - **D3** — one-shot Jobs leave the sync path.
