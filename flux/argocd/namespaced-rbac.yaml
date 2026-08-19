@@ -50,6 +50,7 @@
 #   build-cluster-connection-write      flux-system  configmaps get,create,update,patch
 #   build-cluster-connection-kubeconfig prow         configmaps get,create,update,patch
 #   build-cluster-connection-registrar  argocd       secrets    get,create,update,patch
+#                                       argocd       appprojects get,patch
 #
 # Reconciled by Flux, like cluster-scoped-rbac.yaml, for the same reason: Argo CD
 # cannot apply the object that authorises Argo CD. Phase 5 has to decide who owns both.
@@ -192,6 +193,16 @@ rules:
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["get", "create", "update", "patch"]
+# The Job also appends the spoke to the AppProject's destinations. That is runtime work
+# for the same reason the registration is: a destination naming the build cluster is keyed
+# to a cluster ACK owns, so Terraform must not hold it (D13). Terraform declares only the
+# hub destination and ignores changes to the list.
+#
+# get and patch only - not create or delete. The AppProject is created and owned by
+# Terraform; the Job amends one field of it.
+- apiGroups: ["argoproj.io"]
+  resources: ["appprojects"]
+  verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
