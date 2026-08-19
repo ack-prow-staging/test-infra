@@ -34,11 +34,13 @@ locals {
   # Granting authorization is not the same as Argo CD acting: while Flux still owns
   # these objects there are no Applications targeting them, so this is inert until
   # Phase 4 cutover. flux-system is transitional and should be dropped in Phase 5.
+  # `prometheus` was here until kube-prometheus-stack was removed from the repo. Nothing
+  # writes to that namespace any more, so the grant went with it rather than lingering as
+  # authorization for something that no longer exists.
   argocd_hub_namespaces = [
     "ack-system",
     "prow",
     "test-pods",
-    "prometheus",
     "flux-system",
   ]
 }

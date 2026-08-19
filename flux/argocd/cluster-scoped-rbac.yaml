@@ -75,7 +75,7 @@ rules:
 # Every other grantor rule in this repo could honestly be described as access Argo CD
 # already had, only expressed where the RBAC authorizer can see it -
 # AmazonEKSAdminPolicy grants it namespace-scoped admin over
-# {ack-system, prow, test-pods, prometheus, flux-system}. Cluster-wide prowjobs write
+# {ack-system, prow, test-pods, flux-system}. Cluster-wide prowjobs write
 # and pod read is WIDER than that, so that description does not apply here.
 #
 # The alternative was narrowing the plugin's own ClusterRole to namespaced Roles, which

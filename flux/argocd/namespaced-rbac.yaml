@@ -35,7 +35,7 @@
 # NAMESPACED, NOT CLUSTER-SCOPED, deliberately. Adding configmaps write to the
 # ClusterRole in cluster-scoped-rbac.yaml would grant it in every namespace, which is
 # broader than AmazonEKSAdminPolicy gives today - that association is scoped to
-# {ack-system, prow, test-pods, prometheus, flux-system}. Three Roles in the three
+# {ack-system, prow, test-pods, flux-system}. Three Roles in the three
 # namespaces that actually need them keeps the grant equal to the existing one rather
 # than wider.
 #
@@ -187,7 +187,7 @@ rules:
 # own a registration keyed to it (D13).
 #
 # This namespace is the one gap the associated access policies leave. AmazonEKSAdminPolicy
-# is scoped to {ack-system, prow, test-pods, prometheus, flux-system} and does not include
+# is scoped to {ack-system, prow, test-pods, flux-system} and does not include
 # argocd; AmazonEKSArgoCDPolicy covers argocd but is the capability's own-operation grant,
 # which reads cluster Secrets rather than managing RBAC.
 #

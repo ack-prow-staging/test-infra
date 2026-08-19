@@ -15,9 +15,9 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 | Argo CD Applications | **12 live**, all Synced/Healthy. **16 declared**: 15 by Terraform, all hub-targeted, plus `prow-build-cluster-resources` which is build-cluster-targeted and therefore composed by the connection chart and applied by its Job, never by Terraform (D13). Verified: all 15 render with the exact values Terraform supplies |
 | Cut over | **12** paths, all `automated`, prune off everywhere |
 | Wired, not live | **8** — `prow-config`, `prow-data-plane`, `prow-jobs`, `prow-plugins`, `prow-agent-workflows`, `prow-build-cluster-resources`, `prow-crds`, `secrets`. All verified against live objects; awaiting push, apply and cutover |
-| Deleted, not migrated | **1** — `prometheus-dashboards` and its recording rules. Unmaintained since 2021 |
+| Deleted, not migrated | **2** — `prometheus-dashboards` and its recording rules (unmaintained since 2021), and `prometheus` itself: `kube-prometheus-stack` had no reachable Grafana, alerts routed to `"null"`, and migrating it would have cost Argo CD cluster-admin |
 | ACK CRs | 64, all Argo CD-tracked, 0 deleting |
-| Still on Flux, not started | **1** — `prometheus`. Blocked on a privilege decision, not on code: its chart's five ClusterRoles would need 112 further cluster-wide triples, which is cluster-admin by another name. See *What is left* |
+| Still on Flux, not started | **none.** Every path is cut over, wired, or deleted. What remains is push, apply, eight cutovers, then Flux removal |
 | Clusters registered | 2 — hub, plus the build cluster as a spoke |
 
 `Synced` was never progress on its own. An Application whose objects are all Helm hooks has
@@ -169,10 +169,10 @@ waiting, and **three have not been started**.
 
 A correction worth keeping, because it was mine: an earlier version of this table said the
 token-free paths were "blocked on nothing but an Application each". That held for two of the
-four. `secrets` and `prometheus` each carry a distinct problem that has nothing to do with
-substitution — a cluster-wide RBAC grant and an upstream chart source respectively. Zero tokens
-means Argo CD can *render* a path; it does not mean Argo CD is allowed to apply it, or that the
-path is even a git directory.
+four. `secrets` and `prometheus` each carried a distinct problem that had nothing to do with
+substitution — a cluster-wide RBAC grant, and a chart whose own ClusterRoles would have cost
+cluster-admin. Zero tokens means Argo CD can *render* a path; it does not mean Argo CD is allowed to
+apply it, or that the path is worth keeping.
 
 ### `prow-charts` splits unevenly, and `prow-config` is not a value-mapping job
 
@@ -255,7 +255,41 @@ environment rather than the upstream names a reader would guess.
 Still note `reconcileStrategy: ChartVersion` on this HelmRelease: template edits are ignored until
 `Chart.yaml` `version` bumps (see Traps), which bites while iterating on the Flux side.
 
-### `prometheus`: migrating it as-is costs cluster-admin
+### `prometheus`: deleted, because migrating it cost cluster-admin and nothing used it
+
+**Outcome: `kube-prometheus-stack` is gone from the repo** — `flux/prometheus/`,
+`flux/prometheus.yaml`, and the `prometheus` entry in `local.argocd_hub_namespaces`. The analysis
+below is kept because it is why deleting was preferable to migrating, and because the same trap
+applies to any future chart that ships its own ClusterRoles.
+
+The usage evidence, gathered before deciding:
+
+- **Grafana was unreachable.** Every service in the namespace was ClusterIP and there was no
+  Ingress; the only Ingress in the cluster is Prow's. Viewable only by deliberate `port-forward`.
+- **Alerts went nowhere.** The generated Alertmanager config routed everything to receiver
+  `"null"`, the chart default. No Slack, PagerDuty, SNS or email, ever.
+- **The `/metrics` Ingress path was already dead** — it points at a `pushgateway-external` service
+  that does not exist anywhere in the cluster.
+- Its only bespoke content, the Prow dashboards and their recording rules, had been untouched since
+  2021 and was deleted the commit before.
+
+Prometheus *was* scraping — `scrapeMetrics` is on for hook, prow-controller-manager and tide — into
+a store nobody queried, alerting nobody. That is the signature of monitoring set up and never
+finished, which is a fair reason to remove it and re-add it deliberately if it is ever wanted.
+
+Deletion was self-contained, which is what made it safe: `scrapeMetrics` in `prow/config` only adds
+pod annotations and a metrics Service — **no ServiceMonitor or PodMonitor CRs** — and all 13 live
+ServiceMonitors were Helm-owned by the chart itself. So nothing outside the chart depended on the
+`monitoring.coreos.com` CRDs. The annotations are left in place, inert without a scraper, so
+re-adding a stack later needs no change to Prow.
+
+One consequence to expect on apply: narrowing `argocd_hub_namespaces` **replaces**
+`aws_eks_access_policy_association.argocd_hub_write` (its ID is cluster + principal + policy, so a
+namespace-list change cannot be an update). Argo CD loses namespace-scoped write for the moment
+between destroy and create; syncs in flight fail and retry. Nothing else in the full plan is caused
+by this change.
+
+#### Why migrating it would have cost cluster-admin
 
 This was carried in the backlog as "an upstream chart source plus a values file, and probably a
 wider CRD exception". Both halves of that were wrong.
@@ -290,28 +324,24 @@ Granting all 112 is not a bigger version of the `prow-plugins` or `secrets` deci
 `cluster-scoped-rbac.yaml` records as refused. And it would be spent on the **least** critical path
 in the repo: monitoring, not Prow.
 
-Options, none of them free:
+Granting all 112 was not a bigger version of the `prow-plugins` or `secrets` decisions. It is
+`AmazonEKSClusterAdminPolicy` by another route — the exact thing the header of
+`cluster-scoped-rbac.yaml` records as refused — and it would have been spent on the least critical
+thing in the repo.
 
-1. **Disable RBAC creation in the chart and let Terraform own those five ClusterRoles.**
-   `rbac.create: false` on the subcharts, and Terraform — which is cluster-admin and hub-owned —
-   applies them. Argo CD then never applies an RBAC object for this path and needs no new grant.
-   Cost: 121 upstream rules copied into Terraform, to be re-synced on every chart upgrade, with
-   drift being silent.
-2. **Keep `prometheus` on Flux** and scope Flux removal to everything else. Honest, and cheap
-   today, but it means Flux never fully goes away, which was the point.
-3. **Replace the chart** with AWS-managed monitoring (AMP plus managed Grafana, or the EKS
-   observability add-on). Removes the problem, the 112 triples and the vendoring question at once,
-   and is the largest change.
-4. **Grant the 112.** Recorded for completeness. It makes the Argo CD capability role
-   cluster-admin in all but name, including admission-webhook write.
+**If monitoring is ever wanted back**, the option that avoids the grant is: set `rbac.create: false`
+on the subcharts and let Terraform own the five ClusterRoles, since Terraform is cluster-admin and
+hub-owned, so Argo CD never applies an RBAC object for that path. The cost is 121 upstream rules
+copied into Terraform, re-synced on every chart upgrade, with drift silent. AWS-managed monitoring
+(AMP plus managed Grafana, or the EKS observability add-on) sidesteps it entirely and is the option
+to weigh first.
 
-Whichever is chosen, the mechanism questions that looked like the work here are secondary. For the
-record, since they were measured: the chart is 7.2 MB unpacked across 297 files and five subcharts,
-so vendoring it into `charts/` — the house pattern, per `charts/flux2-2.18.4` and
-`scripts/pull-flux-chart.sh` — is 12× the flux2 chart. The alternative, a multi-source Application
-with a `$values` ref, avoids vendoring but adds the repo's first multi-source Application, needs
-the Helm repo in the AppProject's `sourceRepos`, and assumes the managed capability's repo-server
-has egress to a third-party Helm repo, which is unverified. Vendoring depends on nothing but git.
+Two measurements worth keeping so they are not redone: the chart is 7.2 MB unpacked across 297 files
+and five subcharts, so vendoring it into `charts/` — the house pattern, per `charts/flux2-2.18.4`
+and `scripts/pull-flux-chart.sh` — would be 12× the flux2 chart. And a multi-source Application with
+a `$values` ref avoids vendoring but adds the repo's first multi-source Application, needs the Helm
+repo in the AppProject's `sourceRepos`, and assumes the managed capability's repo-server has egress
+to a third-party Helm repo, which was never verified. Vendoring depends on nothing but git.
 
 ### `secrets`: two gaps, and the second is not "read"
 
@@ -408,7 +438,7 @@ the one was ours.
 | ~~`prow-crds`~~ | **done.** Genuinely just an Application — see below |
 | ~~`prometheus-dashboards`~~ | **deleted, not migrated.** Unmaintained since 2021 and nothing referenced its metrics — see below |
 | ~~`secrets`~~ | **done**, and it cost the widest grant in the migration. Take the exit condition — see below |
-| `prometheus` | **the only path left, and it is not a mechanism problem.** Migrating it as-is would make Argo CD effectively cluster-admin. Measured below; needs a decision, not code |
+| ~~`prometheus`~~ | **deleted, not migrated.** Nothing consumed it and migrating it would have cost Argo CD cluster-admin — see below |
 | Phase 5 deletions | `flux/flux` (Flux itself, 5 tokens), `flux/prow/version`, `flux/prow/build-cluster-kubeconfig`, the root `test-infra` Kustomization, `self-managed-vars`. `flux/argocd/` is the exception: it must survive and needs a new owner, since Argo CD cannot apply the objects that authorise Argo CD |
 | `prow-build-cluster-resources` | chart written and Application declared; **needs push, apply and cutover**, none of which has happened. See below |
 

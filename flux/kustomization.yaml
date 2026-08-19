@@ -7,5 +7,4 @@ resources:
 - ack-build-cluster.yaml
 - secrets.yaml
 - prow.yaml
-- prometheus.yaml
 - argocd.yaml
