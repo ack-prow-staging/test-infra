@@ -129,9 +129,31 @@ spec:
       selfHeal is false except on the two paths whose entries explain why. It reverts live
       changes Argo CD did not make, which during diagnosis means fighting a human.
     */}}
+    {{- /*
+      `prune` is NEVER rendered, and this is load-bearing rather than tidy. It cannot be
+      stored alongside `selfHeal: true`: the API server keeps `prune: false` when selfHeal
+      is false, and DROPS it when selfHeal is true - measured on the live objects, where
+      argocd-controller owns f:prune on the 18 selfHeal-false Applications and only
+      f:selfHeal on the two selfHeal-true ones.
+
+      Rendering it anyway makes those two permanently OutOfSync against a field that cannot
+      persist, and because `automated` does not retry a stale revision, the root then sits
+      OutOfSync until some unrelated commit moves the revision. Absent means false, so
+      omitting it is identical in effect - the same fix, for the same reason, as
+      `automated = {}` on the root Application in bootstrap/argocd-applications.tf.
+    */}}
+    {{- if default false $app.selfHeal }}
     automated:
-      prune: false
-      selfHeal: {{ default false $app.selfHeal }}
+      selfHeal: true
+    {{- else }}
+    {{- /*
+      An explicit EMPTY MAP, not a bare `automated:` key. A key with nothing under it
+      renders as `automated: null`, which DISABLES auto-sync rather than enabling it with
+      defaults - it would silently stop 17 paths reconciling while still looking declared.
+      Presence of the (possibly empty) object is what enables it.
+    */}}
+    automated: {}
+    {{- end }}
     {{- end }}
 
   {{- with default (list) $app.ignoreDifferences }}
