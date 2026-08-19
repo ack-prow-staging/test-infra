@@ -13,9 +13,9 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 |---|---|
 | Kustomizations / HelmReleases Ready | 27/27, 17/17 |
 | Argo CD Applications | 12 live, all Synced/Healthy — all 12 Terraform-declared and hub-targeted. A 13th (`prow-build-cluster-resources`, build-cluster-targeted) is composed by the connection chart and applied by its Job, and is **not live yet** — see below |
-| Cut over | **12 of 15** chart paths, all `automated`, prune off everywhere. The three uncut — `prow-build-cluster-resources`, `prow-agent-workflows`, `prow-plugins` — all have charts and Applications written and verified against live; none is live |
+| Cut over | **12 of 16** chart paths, all `automated`, prune off everywhere. The four uncut — `prow-build-cluster-resources`, `prow-agent-workflows`, `prow-plugins`, `prow-jobs` — all have charts and Applications written and verified against live; none is live |
 | ACK CRs | 64, all Argo CD-tracked, 0 deleting |
-| Still on Flux | the three above, awaiting push/apply/cutover, plus `prow-jobs` which is not started |
+| Still on Flux | the four above, awaiting push, apply and cutover. Nothing else |
 | Clusters registered | 2 — hub, plus the build cluster as a spoke |
 
 `Synced` was never progress on its own. An Application whose objects are all Helm hooks has
@@ -162,7 +162,7 @@ all; parse them. They also rewrite `generation` harmlessly on sync.
 
 | item | blocker |
 |---|---|
-| `prow-jobs` | the last `${TOKEN}` path, and the only one not started. `prow-agent-workflows` and `prow-plugins` are converted and are the worked examples — the generator does **not** change; see below |
+| — | **All paths now have charts and Applications.** Nothing is live: four await push, apply and cutover. The generator was never changed; see below |
 | `prow-build-cluster-resources` | chart written and Application declared; **needs push, apply and cutover**, none of which has happened. See below |
 
 ### Next task in detail: `prow-build-cluster-resources`
@@ -362,18 +362,62 @@ rule, which points at the wrong file.
 `prow-jobs` is the last and most awkward: its `templates/` holds 26 generator templates, and
 it has the two problems below.
 
-Two things that will bite on `prow-jobs`:
+#### `prow-jobs`, and the two things that bit
 
-- `job-config-job.yaml` contains a `batch/v1` **Job** whose `spec.template` is immutable,
-  which is why `prow-jobs` carries `force: true` today. Helm's `force` is not a substitute
-  (see Traps); the Job has to become a hook with `before-hook-creation`, like `prow-mirror`
-  and `prow-build-cluster-connection`. It then needs a tracked object to trigger it — the
-  three generated ConfigMaps (`jobs-config`, `label-config`, `test-config`) serve, since a
-  content change to any of them is drift.
-- Regeneration is **not** byte-stable: `addAutoGenHeader` stamps `# Last generated on
-  <timestamp>` into all seven generated files on every run, so `make prow-gen` always
-  produces a diff in files dev and prod also consume. That is the real reason to touch the
-  generator deliberately rather than incidentally.
+Converted the same way, with three differences worth knowing.
+
+**The immutable Job.** `job-config-job.yaml` carries a `batch/v1` Job whose `spec.template` is
+immutable, which is what `force: true` on the Kustomization handles today. Argo CD's
+equivalent is the per-resource annotation `Force=true,Replace=true`, which the Argo CD docs
+name for exactly this case ("job resources that should run every time when syncing"). The
+chart inserts it by anchoring on the Job's four identity lines rather than by parsing and
+re-serialising the document, so the file's comments survive — with an assertion that fails
+the render if the anchor stops matching, since a silent no-op would bring the immutability
+error back later. Scoped to the Job by annotation and **not** set on the Application: as an
+Application-level syncOption, `Force` would delete and recreate the ConfigMaps and RBAC too,
+handing them new uids, which is the one thing the cutover procedure exists to catch.
+
+**Flux's `$$` unescaping had to be reproduced.** Two sequences in that file are escaped so
+postBuild leaves them for the container — `envsubst '$$TEST_INFRA_ORG ...'`, where the
+container needs `$VAR` so envsubst restricts substitution to those names, and
+`config.yaml: "$${GZIPPED_B64}"`, which the container's shell expands. Helm has no unescaping
+step. Both failure modes are silent: `$$TEST_INFRA_ORG` reaching envsubst leaves jobs.yaml
+unsubstituted, and `$${GZIPPED_B64}` reaching bash expands `$$` to the shell PID and writes a
+corrupt `job-config`. The chart sentinels `$$` before substituting, guards, then unescapes —
+in that order, so the guard cannot mistake an escaped sequence for an unresolved token.
+Asserted against what the container needs rather than against a reference render, since the
+`flux` CLI is not available here.
+
+**`selfHeal` is load-bearing here, not a nicety.** `ttlSecondsAfterFinished` deletes the Job
+300s after it finishes; Argo CD sees the absence as drift and recreates it, which re-runs it
+and refreshes `job-config`. That reproduces today's behaviour, where the same ttl against a 5m
+Kustomization interval means Flux recreates it on most reconciles. Without it the Job would run
+once and `job-config` would go stale the next time `jobs.yaml` changed — `jobs.yaml` is not a
+tracked object here, so its content cannot be the trigger. It is inert until `automated` is
+set at cutover, which is the right order: kustomize-controller keeps recreating the Job until
+then.
+
+Also: `jobs.yaml` is in `.helmignore`. At 1.9 MB it is the largest file in the repo, it never
+enters the render, and excluding it keeps it out of every manifest generation.
+
+One trap found by verification rather than by reading: **the block scalar's chomping indicator
+has to follow the file.** A clipped `|` always emits exactly one trailing newline, which is
+right for `test_config.yaml` and `jobs_config.yaml` but adds a byte to `labels.yaml`, which the
+generator writes without one. One byte is a real content difference to the API server, so it
+would have shown as permanent drift against the object kustomize produced. The template picks
+`|` or `|-` per file.
+
+A note that outlives these conversions: regeneration is **not** byte-stable.
+`addAutoGenHeader` stamps `# Last generated on <timestamp>` into all seven generated files on
+every run, so `make prow-gen` always produces a diff in files dev and prod also consume. That
+is a standing reason to run it deliberately rather than incidentally — and part of why none of
+these conversions changed the generator.
+
+An earlier draft of this section proposed making the Job a Helm hook with
+`before-hook-creation`, on the grounds that Helm's `force` cannot fix Job immutability (it
+cannot — see Traps). That was not needed: Argo CD's per-resource `Force=true,Replace=true`
+covers it without taking the Job out of the tracked set, which is what keeps `selfHeal` able
+to re-run it.
 
 Unrelated but found while measuring, and worth someone's attention: `dev.tfvars` sets
 `periodics_enabled = "false"`, but that variable is not declared in `bootstrap/variables.tf`

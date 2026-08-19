@@ -83,6 +83,15 @@ locals {
     testInfraOrg    = var.test_infra_org
     testInfraRepo   = var.test_infra_repo
     testInfraBranch = var.test_infra_branch
+
+    # For prow-jobs. The only token on the three generated paths that had no counterpart here
+    # and had to be added; same expression as CONTROLLER_ECR_REGISTRY in self-managed-vars, so
+    # the two cannot drift while both exist.
+    #
+    # It is threaded into the substitutor Job's env and passed to envsubst over jobs.yaml, but
+    # currently has zero occurrences in that file. Kept because dropping it would change the
+    # Job's behaviour on a path being migrated; worth removing from both once confirmed dead.
+    controllerEcrRegistry = "public.ecr.aws/${local.controller_ecr_alias}"
   }
 
   # One entry per converted chart path. `values` lists which parameters that chart
@@ -199,6 +208,62 @@ locals {
       # RBAC and a Job. There is no AWS resource behind any of it, so Argo CD reasserting
       # desired state cannot fight ACK or overwrite someone mid-diagnosis of AWS state.
       self_heal = true
+    }
+    prow-jobs = {
+      # Last of the generated paths. Same shape as the other two - chart in the generated
+      # files' own directory, read with .Files.Get, generator untouched - but three things are
+      # specific to it.
+      #
+      # Its templates/ holds 25 generator templates across four subdirectories, all named in
+      # .helmignore. jobs.yaml is ignored too: at 1.9 MB it is the largest file in the repo and
+      # the chart does not need it, because it never enters the render. It exceeds the 1 MB
+      # ConfigMap limit, so the substitutor Job clones the repo at runtime, resolves it with
+      # envsubst and gzips the result into job-config. That mechanism is reconciler-independent
+      # and survives the migration untouched, which is why the 11,511 tokens in that file are
+      # not migration work.
+      #
+      # The Job's spec.template is immutable, which is what `force: true` on the Flux
+      # Kustomization handles. The chart annotates that Job alone with
+      # `Force=true,Replace=true`, which is the case the Argo CD docs name for jobs that should
+      # re-run on sync. Scoped to the Job by annotation rather than set here: as an
+      # Application-level syncOption it would delete and recreate the ConfigMaps and RBAC too,
+      # giving them new uids, which is exactly what the cutover procedure checks against.
+      #
+      # And it reproduces Flux's `$$` unescaping in the chart. Two sequences in
+      # job-config-job.yaml are escaped so postBuild leaves them for the container -
+      # `envsubst '$$TEST_INFRA_ORG ...'` and `config.yaml: "$${GZIPPED_B64}"`. Helm has no
+      # unescaping step, and getting it wrong is silent: jobs.yaml would go unsubstituted, or
+      # bash would expand `$$` to its PID and write a corrupt job-config. Asserted in the
+      # chart and in verification against what the container needs.
+      path             = "prow/jobs"
+      target_namespace = "prow"
+
+      # prowVersion, toolsVersion and prowPatchRevision are deliberately absent, as on
+      # prow-mirror: static git-authored strings, so they are chart defaults rather than
+      # per-environment parameters. Phase 5 deletes flux/prow/version/ and leaves those
+      # defaults as the only copy - until then all three copies must agree.
+      values = ["prowImagesRepoUri", "testInfraOrg", "testInfraRepo", "testInfraBranch", "accountId", "region", "controllerEcrRegistry"]
+
+      # selfHeal, and here it is load-bearing rather than a nicety. ttlSecondsAfterFinished
+      # deletes the Job 300s after it finishes, which Argo CD sees as drift; selfHeal recreates
+      # it, which re-runs it and refreshes job-config. That reproduces today's behaviour, where
+      # the same ttl against a 5m Kustomization interval means Flux recreates it on most
+      # reconciles. Without it the Job would run once and job-config would go stale the next
+      # time jobs.yaml changed - jobs.yaml is not a tracked object here, so its content cannot
+      # be the trigger.
+      #
+      # Safe for the same reason it is on prow-build-cluster-connection: this chart owns RBAC,
+      # ConfigMaps and a Job, with no AWS resource behind any of it.
+      #
+      # Inert until cutover: selfHeal sits inside the automated block, so declaring it here
+      # does nothing while sync is manual. That is the correct order - kustomize-controller is
+      # still recreating the Job on its own interval until this path is cut over, so nothing
+      # stops refreshing job-config in between.
+      self_heal = true
+
+      # NOT cut over. Manual sync until the first sync confirms the six live objects kept their
+      # uid; the Job is absent most of the time and is expected to be created, not adopted.
+      # prow-jobs' Kustomization has had prune: false all along.
     }
     prow-plugins = {
       # Second of the generated paths. Same shape as prow-agent-workflows - chart in the
