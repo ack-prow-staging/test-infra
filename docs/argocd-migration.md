@@ -11,13 +11,15 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 
 | | |
 |---|---|
-| Kustomizations / HelmReleases Ready | 26/26, 17/17 |
-| Argo CD Applications | **12 live**, all Synced/Healthy. **16 declared**: 15 by Terraform, all hub-targeted, plus `prow-build-cluster-resources` which is build-cluster-targeted and therefore composed by the connection chart and applied by its Job, never by Terraform (D13). Verified: all 15 render with the exact values Terraform supplies |
+| Kustomizations / HelmReleases Ready | 24/24, 16/16 (was 26 and 17 before the `prometheus` removal) |
+| Branch state | **deployed to staging.** `feat/argocd-migration-clean` @ `398aa32` is pushed, Flux has applied it, and `terraform apply` has run (targeted at the Applications and the access-policy association) |
+| Argo CD Applications | **20 live**: 12 Synced/Healthy and cut over, 8 OutOfSync on manual sync awaiting cutover. 19 are Terraform-declared and hub-targeted; the 20th, `prow-build-cluster-resources`, was composed by the connection chart and applied by its Job at runtime, never by Terraform (D13) — confirmed live, with its destination set to the build cluster ARN and **no rejection condition** |
 | Cut over | **12** paths, all `automated`, prune off everywhere |
 | Wired, not live | **8** — `prow-config`, `prow-data-plane`, `prow-jobs`, `prow-plugins`, `prow-agent-workflows`, `prow-build-cluster-resources`, `prow-crds`, `secrets`. All verified against live objects; awaiting push, apply and cutover |
 | Deleted, not migrated | **2** — `prometheus-dashboards` and its recording rules (unmaintained since 2021), and `prometheus` itself: `kube-prometheus-stack` had no reachable Grafana, alerts routed to `"null"`, and migrating it would have cost Argo CD cluster-admin |
 | ACK CRs | 64, all Argo CD-tracked, 0 deleting |
-| Still on Flux, not started | **none.** Every path is cut over, wired, or deleted. What remains is push, apply, eight cutovers, then Flux removal |
+| Still on Flux, not started | **none.** Every path is cut over, wired, or deleted. What remains is **eight cutovers**, then Flux removal |
+| Left behind by the `prometheus` teardown | an empty `prometheus` namespace and **10 orphaned `monitoring.coreos.com` CRDs**. Helm never deletes CRDs installed from a chart's `crds/` directory, and helm-controller does not delete a namespace it created. Both inert, no CRs remain, safe to delete by hand |
 | Clusters registered | 2 — hub, plus the build cluster as a spoke |
 
 `Synced` was never progress on its own. An Application whose objects are all Helm hooks has
