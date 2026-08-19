@@ -14,9 +14,9 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 | Kustomizations / HelmReleases Ready | 26/26, 17/17 |
 | Argo CD Applications | **12 live**, all Synced/Healthy. **16 declared**: 15 by Terraform, all hub-targeted, plus `prow-build-cluster-resources` which is build-cluster-targeted and therefore composed by the connection chart and applied by its Job, never by Terraform (D13). Verified: all 15 render with the exact values Terraform supplies |
 | Cut over | **12** paths, all `automated`, prune off everywhere |
-| Converted, not live | **4** — `prow-build-cluster-resources`, `prow-agent-workflows`, `prow-plugins`, `prow-jobs`. Charts written, Applications declared, all verified against live objects; awaiting push, apply and cutover |
+| Wired, not live | **6** — `prow-build-cluster-resources`, `prow-agent-workflows`, `prow-plugins`, `prow-jobs` (charts written), plus `prow-crds` and `prometheus-dashboards` (no conversion needed — Argo CD reads the same kustomize directory). All verified against live objects; awaiting push, apply and cutover |
 | ACK CRs | 64, all Argo CD-tracked, 0 deleting |
-| Still on Flux, not started | **6** paths — see *What is left*. `prow-charts` is the substantial one |
+| Still on Flux, not started | **3** — `prow-charts` (12 tokens, the substantial one), `secrets` (cluster-wide RBAC), `prometheus` (upstream chart source). See *What is left* |
 | Clusters registered | 2 — hub, plus the build cluster as a spoke |
 
 `Synced` was never progress on its own. An Application whose objects are all Helm hooks has
@@ -163,15 +163,52 @@ all; parse them. They also rewrite `generation` harmlessly on sync.
 
 This table was previously scoped to the paths being converted, which made it read as though
 Flux removal were one step away. It is not. Measured against the live cluster — 26
-Kustomizations and 17 HelmReleases — twelve paths are cut over, four are converted and waiting,
-and **six have not been started**. Of the six, only `prow-charts` carries tokens; the rest are
-blocked on nothing but an Application each.
+Kustomizations and 17 HelmReleases — twelve paths are cut over, six are converted or wired and
+waiting, and **three have not been started**.
+
+A correction worth keeping, because it was mine: an earlier version of this table said the
+token-free paths were "blocked on nothing but an Application each". That held for two of the
+four. `secrets` and `prometheus` each carry a distinct problem that has nothing to do with
+substitution — a cluster-wide RBAC grant and an upstream chart source respectively. Zero tokens
+means Argo CD can *render* a path; it does not mean Argo CD is allowed to apply it, or that the
+path is even a git directory.
+
+### The token-free paths need no conversion at all
+
+`prow-crds` and `prometheus-dashboards` are now wired, and they are the first paths that
+required **no chart and no generator change**. Both are plain kustomize directories with no
+`${TOKEN}`, so Argo CD reads the same directory Flux reads and runs kustomize itself. That is
+worth stating plainly: the chart conversions were never about Helm being better, only about
+`postBuild` substitution having no Argo CD equivalent. With no tokens, there is nothing to
+solve.
+
+Consequences specific to this shape:
+
+- The Application carries **no `helm` block at all**. `helm` is explicit tool configuration and
+  wins detection, so an empty `helm: {parameters: []}` would make Argo CD run Helm against a
+  directory with no `Chart.yaml` and fail instead of falling through to `kustomization.yaml`.
+  `bootstrap/argocd-applications.tf` omits the block when a path declares no values.
+- **Cutover is suspending the Flux Kustomization, not removing content.** The path is shared and
+  unchanged, so the objects never go stale.
+- `prune: false` still had to land first, and for a different reason than usual: deleting or
+  suspending a Kustomization with prune enabled garbage-collects what it applied. For
+  `prow-crds` that is the ProwJob CRD, and it would take every ProwJob with it.
+- `kustomize` features carry over unchanged — `prometheus-dashboards` relies on
+  `disableNameSuffixHash` and the `grafana_dashboard: "1"` label from `generatorOptions`, both
+  plain kustomize, not Flux.
+
+Verified: the dashboards ConfigMap renders byte-identical to live, same four keys and label. The
+CRD matches on every field except `spec.preserveUnknownFields: false`, which the API server
+accepts and drops as deprecated — recorded against that Application as the one thing to expect
+on first sync, with no `ignoreDifferences` added pre-emptively, per the rule above.
 
 | item | blocker |
 |---|---|
 | the four converted paths | push, `terraform apply`, then cut over. No code left to write; see the two sections below for their specifics |
 | `prow-charts` → `prow-config`, `prow-data-plane` | **the substantial one, and previously unlisted.** These two HelmReleases carry the Prow components themselves and 12 distinct tokens across 25 occurrences in their `values` blocks, substituted by `prow-charts`' `postBuild`. The charts already exist (`prow/config`, `prow/data-plane`) so no chart work is needed — the work is moving ~40 values from HelmRelease `values` into Application `helm`, and `reconcileStrategy: ChartVersion` on both means template edits are ignored until `Chart.yaml` `version` bumps (see Traps) |
-| `prow-crds`, `prometheus`, `prometheus-dashboards`, `secrets` | **zero tokens between them.** Nothing blocks these but an Application each — no substitution problem, so they are the cheapest remaining work. (`prometheus-dashboards` has six `${...}` occurrences, all lowercase Grafana datasource refs, not Flux tokens.) |
+| ~~`prow-crds`, `prometheus-dashboards`~~ | **done.** Both were genuinely just an Application each — see below |
+| `secrets` | zero tokens, but **not** cheap. `secrets-store-rbac.yaml` is a ClusterRole granting `secrets` create/delete/get/list/patch/update/watch **cluster-wide**, plus its binding. Escalation prevention means Argo CD must hold that itself to create it, and cluster-wide secrets write is a materially bigger grant than the `prow-plugins` one — it is read access to every Secret in the cluster. The narrowing option is much more attractive here: the binding's only subject is the `secrets-store-csi-driver` ServiceAccount, so scope it to the namespaces that actually need it. Do not repeat the `prow-plugins` decision by reflex |
+| `prometheus` | zero tokens, and **not an Application either.** The path contains only a `HelmRepository` + `HelmRelease` for upstream `kube-prometheus-stack` 84.5.0, so migrating means an Application whose source is that Helm repo, which needs the repo added to the AppProject's `sourceRepos` (currently the GitHub repo only). Its ~200-line `values` block, including the Prow recording rules, has to go somewhere: the clean route is a multi-source Application with a `$values` ref at `flux/prometheus/values.yaml`, which nothing else here uses. It also installs many CRDs, so the `prow-crds` in-cluster exception probably has to widen |
 | Phase 5 deletions | `flux/flux` (Flux itself, 5 tokens), `flux/prow/version`, `flux/prow/build-cluster-kubeconfig`, the root `test-infra` Kustomization, `self-managed-vars`. `flux/argocd/` is the exception: it must survive and needs a new owner, since Argo CD cannot apply the objects that authorise Argo CD |
 | `prow-build-cluster-resources` | chart written and Application declared; **needs push, apply and cutover**, none of which has happened. See below |
 

@@ -209,6 +209,48 @@ locals {
       # desired state cannot fight ACK or overwrite someone mid-diagnosis of AWS state.
       self_heal = true
     }
+    # The two token-free paths. NOTHING IS CONVERTED FOR THESE.
+    #
+    # Both are plain kustomize directories with no ${TOKEN} anywhere, so there was nothing for
+    # postBuild to do and nothing for a chart to solve. Argo CD reads the same directory Flux
+    # reads and runs kustomize itself; no `values`, and therefore no `helm` block, which is
+    # what lets tool detection fall through to kustomization.yaml.
+    #
+    # Their cutover is also different: because the path is unchanged, the objects never go
+    # stale, so cutover is suspending the Flux Kustomization in git rather than removing
+    # content. `prune: false` still had to go in first - deleting or suspending a Kustomization
+    # with prune enabled garbage-collects what it applied, and for prow-crds that means the
+    # ProwJob CRD and every ProwJob with it.
+    prow-crds = {
+      # One CustomResourceDefinition, cluster-scoped, so target_namespace is only a default.
+      #
+      # Argo CD can manage it because AmazonEKSArgoCDClusterPolicy grants CRD create, and
+      # bootstrap/argocd-access.tf adds the narrow in-cluster rule for get/update/patch that
+      # the policy withholds for CRDs Argo CD does not own. That exception was added for this
+      # path specifically - scripts/upgrade-prow.sh needs to refresh this CRD.
+      #
+      # ONE FIELD TO WATCH ON FIRST SYNC, and only one: the manifest sets
+      # spec.preserveUnknownFields: false, which the API server accepts and then drops, because
+      # it is deprecated and already the default for apiextensions.k8s.io/v1. Everything else in
+      # the render matches live exactly. If Argo CD reports this path OutOfSync with that field
+      # as the only difference, that is why - and an ignoreDifferences entry for it is the fix.
+      # Not added pre-emptively, per the rule in the migration doc: add an exception only for a
+      # field Argo CD itself calls OutOfSync. Editing the CRD instead would fork it from
+      # upstream, and upgrade-prow.sh would overwrite the edit.
+      path             = "flux/prow/crds"
+      target_namespace = "prow"
+    }
+    prometheus-dashboards = {
+      # Four Grafana dashboard JSONs in one generated ConfigMap. The generator sets
+      # disableNameSuffixHash and the grafana_dashboard: "1" label that Grafana's sidecar
+      # watches for, and kustomize under Argo CD honours both - they are plain
+      # generatorOptions, not a Flux feature.
+      #
+      # The ConfigMap carries no namespace of its own; the Flux Kustomization supplies it via
+      # targetNamespace, and here destination.namespace does the same job.
+      path             = "prow/prometheus-dashboards"
+      target_namespace = "prometheus"
+    }
     prow-jobs = {
       # Last of the generated paths. Same shape as the other two - chart in the generated
       # files' own directory, read with .Files.Get, generator untouched - but three things are
@@ -347,32 +389,46 @@ resource "kubernetes_manifest" "argocd_application" {
     spec = {
       project = kubernetes_manifest.argocd_project.manifest.metadata.name
 
-      source = {
-        repoURL        = "https://github.com/${var.test_infra_org}/${var.test_infra_repo}"
-        targetRevision = var.test_infra_branch
-        path           = each.value.path
-
-        helm = merge(
-          {
-            # Parameters, not a values file: these are per-environment and Terraform is
-            # the only thing that knows them.
-            parameters = [
-              for k in lookup(each.value, "values", []) : {
-                name  = k
-                value = local.argocd_chart_values[k]
-              }
-            ]
-          },
-          # values carries anything --set cannot express - currently only the test_config
-          # content for prow-build-cluster-resources, whose `.` and `,` characters --set
-          # would read as path and list separators. Argo CD applies values first and
-          # parameters second, and the two never carry the same key, so they do not
-          # interact.
-          lookup(each.value, "values_yaml", null) != null ? {
-            values = each.value.values_yaml
-          } : {}
-        )
-      }
+      source = merge(
+        {
+          repoURL        = "https://github.com/${var.test_infra_org}/${var.test_infra_repo}"
+          targetRevision = var.test_infra_branch
+          path           = each.value.path
+        },
+        # helm is OMITTED ENTIRELY for paths that are not charts, which is why this is a merge
+        # rather than a literal object.
+        #
+        # A `helm` block is explicit tool configuration and wins Argo CD's tool detection
+        # outright. Emitting `helm = { parameters = [] }` for a kustomize directory would make
+        # Argo CD run Helm against a directory with no Chart.yaml and fail, instead of falling
+        # through to the implicit rule that finds kustomization.yaml.
+        #
+        # Those paths exist because substitution was the only thing that forced the chart
+        # conversions: a path with no ${TOKEN} needs no values, so Argo CD can read the same
+        # kustomize directory Flux reads, unchanged. Nothing is converted for them at all.
+        lookup(each.value, "values", []) == [] && lookup(each.value, "values_yaml", null) == null ? {} : {
+          helm = merge(
+            {
+              # Parameters, not a values file: these are per-environment and Terraform is
+              # the only thing that knows them.
+              parameters = [
+                for k in lookup(each.value, "values", []) : {
+                  name  = k
+                  value = local.argocd_chart_values[k]
+                }
+              ]
+            },
+            # values carries anything --set cannot express - currently only the test_config
+            # content for prow-build-cluster-connection, whose `.` and `,` characters --set
+            # would read as path and list separators. Argo CD applies values first and
+            # parameters second, and the two never carry the same key, so they do not
+            # interact.
+            lookup(each.value, "values_yaml", null) != null ? {
+              values = each.value.values_yaml
+            } : {}
+          )
+        }
+      )
 
       destination = {
         # The capability registers the cluster by ARN, not by URL. A URL here would

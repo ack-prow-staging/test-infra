@@ -40,7 +40,12 @@ spec:
     kind: GitRepository
     name: test-infra
   path: ./flux/prow/crds
-  prune: true
+  # prune disabled ahead of the Argo CD cutover (D19-P1). This path is NOT converted - Argo CD
+  # reads this same kustomize directory, since it carries no tokens - so the objects never go
+  # stale and cutover is suspending this Kustomization rather than changing content. prune is
+  # what makes that dangerous: Flux garbage-collects what a Kustomization applied when it is
+  # deleted, and here that is the ProwJob CRD, which would take every ProwJob with it.
+  prune: false
   dependsOn:
   - name: ack-pod-identities
 ---
