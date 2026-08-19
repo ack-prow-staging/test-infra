@@ -47,6 +47,48 @@ Application `helm.parameters` directly. `self-managed-vars` is deleted, not repl
 
 [argo-cd#12060]: https://github.com/argoproj/argo-cd/issues/12060
 
+### Alternatives considered
+
+Recorded because "why not just keep the kustomizations" is the first question this design invites,
+and because only one of the alternatives is ruled out by the platform — the rest are judgement.
+
+| alternative | why not |
+|---|---|
+| **Config management plugin** (envsubst sidecar) — the direct equivalent of `postBuild` | Not available. A CMP is a sidecar on the repo-server, and there is no repo-server to attach one to. The only alternative closed by the platform rather than chosen against |
+| **Kustomize `replacements`** from a committed per-env values file | The strongest option: renders from git alone, no Argo CD feature, no cluster read, YAML stays YAML. Rejected because the values that differ are `accountId`, `testInfraOrg`, `testInfraRepo`, `testInfraBranch` — so the repo becomes environment-aware, and org/branch are self-referential, the repo declaring which repo and branch to read. They already live in SSM, which `bootstrap-env.sh` reads to write `tfvars`; committing them to git is a second source of truth that drifts silently |
+| **Kustomize patches via the Application spec** (`kustomize.patches`, Terraform-emitted) | Satisfies the off-cluster constraint through the same channel as `helm.parameters`, but patches target objects by group/kind/name. `accountId` appears across 11 apps, so it needs one precisely-targeted patch per occurrence. Fine for a handful of values, not for this surface |
+| **Rendered manifests** — CI renders, commits plain YAML to an env branch | Solves substitution outright and gives reviewable pre-merge diffs. Circular here: Prow is the CI and Prow is what is being migrated, so a broken Prow could not be repaired through GitOps |
+| **Terraform renders the manifests** (`templatefile` + `kubernetes_manifest`) | Abandons GitOps for the manifest layer and puts Terraform back in the position this migration takes it out of. See *Ownership* |
+| **Self-hosted Argo CD on-cluster** | Hands back the repo-server and plugins, so substitution stops being a problem at all. This is the honest answer to whether the constraint was necessary: it was not inherent, it follows from choosing the hosted capability, which bought no controller to run, no cluster-admin, and capability log delivery |
+
+**Two things make the chosen path cheaper than it looks.** Helm was already in the stack before the
+migration — four HelmReleases, and `prow/config` and `prow/data-plane` already had `Chart.yaml`,
+`values.yaml` and `templates/`, so for those paths this only changed who renders them, from
+helm-controller to Argo CD. And the charts are thin: `ack-cluster` has 2 distinct `.Values`
+references, `ack-prow` 3, `ack-capability` 2. The whole parameter surface is 14 values across 19
+paths, dominated by `accountId` and `stackName` at 11 apps each. The templating layer does nothing
+but substitute, so the usual objection about logic accumulating in templates does not apply.
+
+**The cost accepted:** adding a new value now touches Terraform, not git alone, because the value
+has to reach the Application spec. That is the coupling behind the one commit in the sequence whose
+git half genuinely depends on its Terraform half (`Give the Prow namespaces and ServiceAccounts an
+owner` — the wave-0 Application needs the `namespaces` grant landing in the same stage). Kustomize
+replacements from git would have decoupled that, and it is the one dimension on which the rejected
+alternative is better. With the environment values living in SSM rather than git, the trade still
+favours charts.
+
+The dividing line held: **only paths needing an environment-specific value were converted.** 15 of
+19 take `helm.parameters`; the other 4 take none and were left alone. Those 4 are not all the same
+shape, which is worth knowing before assuming "no parameters" means "not Helm":
+
+- `prow-crds`, `secrets`, `prow-namespaces` — plain kustomize directories, read exactly as Flux read
+  them, with Argo CD running kustomize itself.
+- `prow-data-plane` — a Helm chart, and detected as one from its `Chart.yaml`. It templates five
+  values, but all of them resolve from its own `values.yaml` (ServiceAccount names), so nothing has
+  to reach it from Terraform.
+
+What the 4 share is needing no value from outside the repo, not being token-free YAML.
+
 ## Ownership
 
 Terraform owns what Argo CD cannot bootstrap for itself: the capability, the hub
