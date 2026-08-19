@@ -17,7 +17,7 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 | Deleted, not migrated | **2** — the Prow Grafana dashboards with their recording rules (unmaintained since 2021), and `kube-prometheus-stack` itself (no reachable Grafana, alerts routed to `"null"`, and migrating it would have cost Argo CD cluster-admin) |
 | uid preservation | **78 of 79 objects adopted in place.** The one exception is the `job-config-substitutor` Job, recreated by design via `Force=true,Replace=true` past its immutable `spec.template` |
 | Branch state | `feat/argocd-migration-clean` deployed to staging and cut over. Terraform applied targeted at the Applications and the access-policy association |
-| Left behind by the `prometheus` teardown | an empty `prometheus` namespace and 10 orphaned `monitoring.coreos.com` CRDs. Helm never deletes CRDs installed from a chart's `crds/` directory. Both inert, no CRs remain |
+| `prometheus` teardown | complete. The namespace and all 10 `monitoring.coreos.com` CRDs are deleted; see below for what Flux left behind and why it had to be done by hand |
 | Clusters registered | 2 — hub, plus the build cluster as a spoke |
 
 `Synced` was never progress on its own. An Application whose objects are all Helm hooks has
@@ -207,7 +207,6 @@ Nothing below is blocked on analysis; each item is work.
 | `flux/argocd/` needs a new owner | it must survive Flux, because Argo CD cannot apply the objects that authorise Argo CD. Terraform is the obvious candidate; it already owns the access entry and the group |
 | dev and prod | this is staging only. The same branch drives all three, so each needs its own `terraform apply` and its own cutover, and prod deserves more care than the eight syncs took here |
 | the `secrets` grant's exit condition | narrow the CSI driver's ClusterRole to namespaced Roles, then delete the cluster-wide secrets rule outright. Written up beside the rule |
-| `prometheus` teardown remnants | an empty `prometheus` namespace and 10 orphaned `monitoring.coreos.com` CRDs. Both inert, no CRs remain |
 | `periodics_enabled` | declared in no variable and plumbed nowhere; `jobs_config.yaml` commits `true` for every environment. Found while converting `prow-jobs`, unrelated to the migration |
 
 ## How each path was converted
@@ -330,6 +329,34 @@ One consequence to expect on apply: narrowing `argocd_hub_namespaces` **replaces
 namespace-list change cannot be an update). Argo CD loses namespace-scoped write for the moment
 between destroy and create; syncs in flight fail and retry. Nothing else in the full plan is caused
 by this change.
+
+**Removing it from git did not remove it from the cluster.** Three classes of object outlived the
+release, and each for a different reason, which is the part worth carrying to dev and prod:
+
+- **The 10 `monitoring.coreos.com` CRDs.** Helm never deletes CRDs installed from a chart's `crds/`
+  directory — by design, since deleting a CRD deletes every CR of that kind cluster-wide. They
+  carried no `meta.helm.sh/release-name`, so helm-controller had no claim on them either.
+- **The namespace.** helm-controller does not delete a namespace it created.
+- **`prometheus-prometheus-kube-admission`**, the admission webhook's TLS Secret. It was written by
+  the chart's `admission-create` Job, and objects created by a *hook* are not part of the release,
+  so nothing pruned it.
+
+Everything the release *did* own was pruned correctly: all five ClusterRoles, the
+ClusterRoleBindings, and both webhook configurations were already gone before the hand-cleanup —
+verified, not assumed, since those grants were the reason migrating would have cost cluster-admin.
+
+Deleted by hand after confirming **zero CRs across all ten kinds**, that the namespace held nothing
+but that Secret and the two auto-created defaults (`kube-root-ca.crt`, the `default`
+ServiceAccount), and that the only remaining git reference to the API group is a `PodMonitor`
+template in the vendored `flux2` chart gated on `prometheus.podMonitor.create`, which is `false` by
+chart default and unset by the HelmRelease — so nothing renders it, and `flux2` goes in Phase 5
+regardless. Prow was unaffected: all 20 Applications stayed Synced/Healthy and all 10 Prow
+deployments stayed at their desired replicas.
+
+One trap while checking this: `v1alpha1.prometheusservice.services.k8s.aws` shows up in any search
+for "prometheus" among cluster-scoped objects. It is **ACK's Amazon Managed Prometheus controller**,
+unrelated to `kube-prometheus-stack`, and deleting it would break an ACK capability. Match on the
+`monitoring.coreos.com` group, not on the substring.
 
 #### Why migrating it would have cost cluster-admin
 
