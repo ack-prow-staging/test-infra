@@ -1022,6 +1022,45 @@ The generalisable point: **a path converted from a Kustomization that applied bo
 and raw manifests is only half converted.** Check `resources:` in the old
 `kustomization.yaml` against what the chart contains, not just that the chart renders.
 
+### `flux-system` outlives Flux, and Prow never depended on it
+
+Phase 5 looked like it needed a decision here: this document claimed the connection Job writes
+`build-cluster-kubeconfig` into `flux-system` and that Prow's components mount it from there,
+which would have forced either a move or a vestigial namespace. **The claim was wrong, and not
+just imprecise** - a ConfigMap mount is namespace-local, so a pod in `prow` cannot mount from
+`flux-system` at all. Measured: `build-cluster-kubeconfig` is in **`prow`**, written there by the
+Job, and that is what crier, deck, sinker and prow-controller-manager mount. The `flux-system`
+copy is `build-cluster-flux-kubeconfig`, a different object, used only by kustomize-controller's
+`kubeConfig.configMapRef` for remote apply - and it dies with Flux.
+
+So nothing Prow needs is in `flux-system`, and no move is required. The namespace still has to
+survive, for a simpler reason: **`prow-build-cluster-connection` deploys 11 objects into it** -
+a ServiceAccount, four Role/RoleBinding pairs, the Job, and the composed
+`build-cluster-resources-application` ConfigMap - and that path outlives Flux (D16).
+
+**Decision: keep the namespace, keep the name.** Terraform already creates it via
+`null_resource.flux_system_namespace`, so it needs no new owner. Retargeting the connection chart
+elsewhere was considered and rejected: it would recreate a Job and four RBAC pairs in a new
+namespace and force a re-verification of the whole build-cluster registration path - the most
+fragile chart in the repo, the one that OOMed and that taught us an in-flight operation is pinned
+to its revision - to buy nothing but a tidier name. A namespace called `flux-system` with no Flux
+in it is a documentation problem, not an operational one.
+
+**One orphan found and removed while checking this.** `Role`/`RoleBinding` `argocd-rbac-grantor`
+in `flux-system`, still labelled `kustomize.toolkit.fluxcd.io/name: argocd-rbac` from the deleted
+Flux path, managed by nothing: `argocd-rbac.tf` grants grantor Roles in `{ack-system, prow,
+test-pods, argocd}` and not there. It granted `configmaps get/create/update/patch`, which the
+built-in `admin` ClusterRole already covers - verified by reading `admin`'s own rules rather than
+by probing, since a `can-i` probe could not tell which binding was answering. Deleted, then
+confirmed the grant still resolves and that `prow-build-cluster-connection` still syncs, since it
+creates four Roles in that namespace and escalation prevention requires Argo CD to hold what they
+grant.
+
+The generalisable point, and the second time this migration has produced it: **deleting a path
+from git does not delete what it applied.** `prune: false` is what makes cutover reversible, and
+it is also what leaves debris. Anything retired that way needs its objects reconciled down by
+hand, or they sit unowned until someone reads a label and wonders.
+
 ## Rules cited in code comments
 
 - **D3** — one-shot Jobs leave the sync path.

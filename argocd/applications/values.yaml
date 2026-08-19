@@ -177,10 +177,12 @@ applications:
   ##############################################################################
 
   prow-build-cluster-connection:
-    # flux-system, not ack-system: the Job writes build-cluster-kubeconfig there and Prow's
-    # crier, deck, sinker and prow-controller-manager mount it from there. Unlike
-    # prow-build-cluster-kubeconfig this path survives Flux (D16), which is why it has an
-    # Application and that one does not.
+    # flux-system is where the CHART's objects live: its ServiceAccount, four Role/RoleBinding
+    # pairs, the Job, and the composed build-cluster-resources-application ConfigMap. The
+    # kubeconfig the Job WRITES goes to `prow`, because a ConfigMap mount is namespace-local and
+    # crier, deck, sinker and prow-controller-manager run there - so this namespace has to
+    # outlive Flux, and Terraform already creates it. Unlike prow-build-cluster-kubeconfig this
+    # path survives Flux (D16), which is why it has an Application and that one does not.
     path: flux/prow/charts/prow-build-cluster-connection
     targetNamespace: flux-system
     wave: 3
