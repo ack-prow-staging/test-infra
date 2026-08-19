@@ -142,18 +142,28 @@ spec:
       omitting it is identical in effect - the same fix, for the same reason, as
       `automated = {}` on the root Application in bootstrap/argocd-applications.tf.
     */}}
-    {{- if default false $app.selfHeal }}
-    automated:
-      selfHeal: true
-    {{- else }}
     {{- /*
-      An explicit EMPTY MAP, not a bare `automated:` key. A key with nothing under it
-      renders as `automated: null`, which DISABLES auto-sync rather than enabling it with
-      defaults - it would silently stop 17 paths reconciling while still looking declared.
-      Presence of the (possibly empty) object is what enables it.
+      `enabled: true` rather than `prune: false, selfHeal: false`, and this is the only
+      shape that is STABLE through Argo CD. Argo CD parses the rendered manifest into its
+      typed Application and re-serialises it with omitempty, which means:
+
+        prune: false, selfHeal: false  ->  serialises to null  ->  CRD REJECTS it
+                                           ("automated in body must be of type object")
+        prune: false, selfHeal: true   ->  serialises to {selfHeal: true}, so the rendered
+                                           prune can never match live: permanently OutOfSync
+        {}                             ->  same null rejection
+
+      Measured, not reasoned: all four shapes round-trip fine through `kubectl apply
+      --server-side`, so the API server is not the constraint - Argo CD's own serialiser is.
+
+      `enabled` is a *bool, so a non-nil true survives omitempty. It states what the other
+      shapes could only imply, and prune/selfHeal keep their false defaults by absence.
     */}}
-    automated: {}
-    {{- end }}
+    automated:
+      enabled: true
+      {{- if default false $app.selfHeal }}
+      selfHeal: true
+      {{- end }}
     {{- end }}
 
   {{- with default (list) $app.ignoreDifferences }}
