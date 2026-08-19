@@ -259,9 +259,11 @@ locals {
         "prow.tideStatusReconcilerBucketName" = "prowLogsBucketName"
       }
 
-      # NOT cut over. Manual sync until the first sync confirms every object kept its uid. This is
-      # the path where that matters most: the nine Deployments carry immutable spec.selector, and a
-      # recreate would take Prow's control plane down rather than roll it.
+      # CUT OVER: the prow-config HelmRelease is suspended in git. This is the path where uid
+      # preservation mattered most - the nine Deployments carry immutable spec.selector, so a
+      # recreate would have taken Prow's control plane down rather than rolling it. Rendering was
+      # verified byte-identical to the HelmRelease's output before this was enabled.
+      automated = true
     }
     prow-data-plane = {
       # Half of prow-charts, and the easy half: five Roles and five RoleBindings in test-pods
@@ -279,6 +281,9 @@ locals {
       # move into the chart. See docs/argocd-migration.md.
       path             = "prow/data-plane"
       target_namespace = "test-pods"
+
+      # CUT OVER: the prow-data-plane HelmRelease is suspended in git.
+      automated = true
     }
     # The two token-free paths. NOTHING IS CONVERTED FOR THESE.
     #
@@ -310,6 +315,10 @@ locals {
       #
       # Ordering: that grant must be live before this Application first syncs, or the sync fails
       # on escalation naming the driver's ClusterRole rather than the missing rule.
+
+      # CUT OVER. automated is what makes a sync honour the Application's own syncOptions - a
+      # hand-requested operation does not, as prow-crds proved.
+      automated        = true
       path             = "flux/secrets"
       target_namespace = "prow"
     }
@@ -353,6 +362,19 @@ locals {
       # the opposite of what this path needs. The fix is the per-resource
       # argocd.argoproj.io/sync-options annotation on the CRD itself; see the note there, which
       # also records that scripts/upgrade-prow.sh will strip it on the next Prow upgrade.
+
+      # The one ignoreDifferences entry in this file, and it was earned rather than assumed. The
+      # manifest sets spec.preserveUnknownFields: false, which is the v1 default and deprecated, so
+      # the API server accepts it and drops it - leaving a diff no sync can ever close. This was
+      # predicted when the path was wired and deliberately NOT added then, per the rule below: add
+      # an exception only for a field Argo CD itself calls OutOfSync. It did, on the first
+      # successful sync, with this as the only remaining difference.
+      ignore_differences = [{
+        group        = "apiextensions.k8s.io"
+        kind         = "CustomResourceDefinition"
+        name         = "prowjobs.prow.k8s.io"
+        jsonPointers = ["/spec/preserveUnknownFields"]
+      }]
 
       # automated, and for this path it is not just the final cutover step - it is the only way the
       # sync honours the Application's own syncOptions. A sync requested by patching `operation`
@@ -413,9 +435,10 @@ locals {
       # stops refreshing job-config in between.
       self_heal = true
 
-      # NOT cut over. Manual sync until the first sync confirms the six live objects kept their
-      # uid; the Job is absent most of the time and is expected to be created, not adopted.
-      # prow-jobs' Kustomization has had prune: false all along.
+      # CUT OVER: the prow-jobs Kustomization is suspended in git. The substitutor Job is absent
+      # most of the time (ttl 300s), so it is created rather than adopted, and selfHeal above is
+      # what keeps recreating it.
+      automated = true
     }
     prow-plugins = {
       # Second of the generated paths. Same shape as prow-agent-workflows - chart in the
@@ -439,10 +462,10 @@ locals {
       target_namespace = "prow"
       values           = ["prowImagesRepoUri", "stackName", "accountId"]
 
-      # NOT cut over. Manual sync until the first sync confirms all five objects kept their
-      # uid - the Deployment matters most, since its spec.selector is immutable and a
-      # recreate would drop the webhook server. prow-plugins' Kustomization has prune: false
-      # as of the earlier commit (D19-P1).
+      # CUT OVER: the prow-plugins Kustomization is suspended in git. The Deployment's
+      # spec.selector is immutable, so the check that mattered was its uid holding rather than the
+      # webhook server being recreated.
+      automated = true
     }
     prow-agent-workflows = {
       # First of the three generated paths to convert, and the smallest: one ConfigMap, two
@@ -470,9 +493,10 @@ locals {
       target_namespace = "prow"
       values           = ["prowImagesRepoUri", "testInfraOrg"]
 
-      # NOT cut over. Manual sync until the first sync confirms the ConfigMap kept its uid;
-      # kustomize-controller still owns it via the prow-agent-workflows Kustomization, whose
-      # prune is now false (D19-P1) so removing that path later will not delete the object.
+      # CUT OVER: the prow-agent-workflows Kustomization is suspended in git and this now owns the
+      # ConfigMap. prune stays false on that Kustomization, so removing the path later will not
+      # delete the object.
+      automated = true
     }
     prow-mirror = {
       path             = "flux/prow/charts/prow-mirror"
@@ -602,7 +626,12 @@ resource "kubernetes_manifest" "argocd_application" {
         } : {}
       )
 
-      # NO ignoreDifferences, deliberately. ACK late-initialises fields the charts never
+      # ignoreDifferences is EMPTY for every path but prow-crds, and that one entry was added only
+      # after Argo CD itself reported the field OutOfSync - which is the rule stated below, not an
+      # exception to it.
+      ignoreDifferences = lookup(each.value, "ignore_differences", [])
+
+      # NO ignoreDifferences otherwise, deliberately. ACK late-initialises fields the charts never
       # set - addonVersion and encryptionConfiguration and registryID, maxSessionDuration
       # and path on every Role, disableSessionTags on every association - and a plain
       # spec comparison flags all of them. They are NOT drift to Argo CD.
