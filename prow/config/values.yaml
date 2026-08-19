@@ -7,12 +7,15 @@ ecrPublicReaderRoleArn: ""
 stage: ""
 
 github:
+  # Per-environment: the org Prow watches. Supplied by the Application.
   organisation: ''
+  # Static in every stage, so defaults here. The bot's identity and the Secret holding its PAT
+  # are properties of the ACK deployment, not of an environment.
   bot:
-    username: ''
-    emailID: '' # The suffix given to Github email addresses <username>-<suffix>@users.noreply.github.com
+    username: 'ack-bot'
+    emailID: '82905295' # The suffix given to Github email addresses <username>-<suffix>@users.noreply.github.com
     personalAccessToken:
-      secretName: ''
+      secretName: 'prowjob-github-pat-token'
 
 prow:
   domain: ''
@@ -30,7 +33,9 @@ region: 'us-west-2'
 # crier, deck) mount a kubeconfig with a `build` context whose exec credential
 # authenticates to the build cluster's API server.
 buildCluster:
-  enabled: false
+  # Provisioned and verified, and wired into the four components that reach it. Pre-submit routing
+  # is enabled separately via presubmit_cluster in prow/jobs/jobs_config.yaml.
+  enabled: true
   # Context name in the kubeconfig; MUST equal the `cluster:` field set on jobs.
   name: build
   # EKS cluster name of the build cluster (e.g. ack-test-infra-prod-build-cluster).
@@ -43,8 +48,22 @@ buildCluster:
   kubeconfigMountPath: /etc/kubeconfig
 
 ingress:
-  create: false
-  annotations: {}
+  # ALB annotations, static in every environment, so they are defaults here rather than values an
+  # Application supplies. That is not only convention: two of them are JSON containing commas,
+  # which Argo CD's helm.parameters (passed as --set) would misparse as list separators. Keeping
+  # them in git means prow-config needs no helm.values block at all - only scalars.
+  #
+  # external-dns.alpha.kubernetes.io/hostname is deliberately absent; the template composes it
+  # from prow.domain, which the Ingress already uses as its host. It was the only per-environment
+  # annotation.
+  create: true
+  annotations:
+    alb.ingress.kubernetes.io/actions.ssl-redirect: '{"Type": "redirect", "RedirectConfig": { "Protocol": "HTTPS", "Port": "443", "StatusCode": "HTTP_301"}}'
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS":443}]'
+    alb.ingress.kubernetes.io/scheme: "internet-facing"
+    alb.ingress.kubernetes.io/success-codes: "200-302"
+    alb.ingress.kubernetes.io/target-type: "ip"
+    alb.ingress.kubernetes.io/ssl-policy: "ELBSecurityPolicy-FS-1-2-Res-2020-10"
 
 # Mirrored image coordinates, from which the chart COMPOSES each component's reference when that
 # component's own `image` below is left empty.
@@ -85,7 +104,7 @@ crier:
   image: ""
   serviceAccount:
     create: false
-    name: ''
+    name: 'prow-deployment-service-account'
 
 deck:
   scrapeMetrics: false
@@ -95,7 +114,7 @@ deck:
     annotations: {}
   serviceAccount:
     create: false
-    name: ''
+    name: 'prow-deployment-service-account'
 
 ghproxy:
   scrapeMetrics: false
@@ -103,47 +122,47 @@ ghproxy:
   volumeSize: 100
 
 hook:
-  scrapeMetrics: false
+  scrapeMetrics: true
   image: ""
   service:
     type: 'ClusterIP'
   serviceAccount:
     create: false
-    name: ''
+    name: 'prow-deployment-service-account'
 
 horologium:
   scrapeMetrics: false
   image: ""
   serviceAccount:
     create: false
-    name: ''
+    name: 'prow-deployment-service-account'
 
 prowControllerManager:
-  scrapeMetrics: false
+  scrapeMetrics: true
   image: ""
   serviceAccount:
     create: false
-    name: ''
+    name: 'prow-deployment-service-account'
 
 sinker:
   scrapeMetrics: false
   image: ""
   serviceAccount:
     create: false
-    name: ''
+    name: 'prow-deployment-service-account'
 
 statusreconciler:
   image: ""
   serviceAccount:
     create: false
-    name: ''
+    name: 'prow-deployment-service-account'
 
 tide:
-  scrapeMetrics: false
+  scrapeMetrics: true
   image: ""
   serviceAccount:
     create: false
-    name: ''
+    name: 'prow-deployment-service-account'
 
 githubApp:
   secret:

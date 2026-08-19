@@ -14,9 +14,9 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 | Kustomizations / HelmReleases Ready | 26/26, 17/17 |
 | Argo CD Applications | **12 live**, all Synced/Healthy. **16 declared**: 15 by Terraform, all hub-targeted, plus `prow-build-cluster-resources` which is build-cluster-targeted and therefore composed by the connection chart and applied by its Job, never by Terraform (D13). Verified: all 15 render with the exact values Terraform supplies |
 | Cut over | **12** paths, all `automated`, prune off everywhere |
-| Wired, not live | **8** — `prow-build-cluster-resources`, `prow-agent-workflows`, `prow-plugins`, `prow-jobs` (charts written), `prow-crds`, `prometheus-dashboards`, `secrets` (no conversion needed), `prow-data-plane` (values moved to chart defaults). All verified against live objects; awaiting push, apply and cutover |
+| Wired, not live | **9** — `prow-config`, `prow-data-plane`, `prow-jobs`, `prow-plugins`, `prow-agent-workflows`, `prow-build-cluster-resources`, `prow-crds`, `prometheus-dashboards`, `secrets`. All verified against live objects; awaiting push, apply and cutover |
 | ACK CRs | 64, all Argo CD-tracked, 0 deleting |
-| Still on Flux, not started | **2** — `prow-config` (chart half done, value mapping left), `prometheus` (upstream chart source). See *What is left* |
+| Still on Flux, not started | **1** — `prometheus`, which needs an upstream chart source rather than a git path. See *What is left* |
 | Clusters registered | 2 — hub, plus the build cluster as a spoke |
 
 `Synced` was never progress on its own. An Application whose objects are all Helm hooks has
@@ -220,15 +220,39 @@ Two things that bit while doing it, both worth keeping:
   valid image reference that fails at pull time rather than at render time. Argo CD parameters
   and `--set` both keep it a string; a hand-written values file is what this guards.
 
-What remains for `prow-config` is only the value mapping, and one detail decides its shape: the
-ingress annotations contain JSON with commas (`alb.ingress.kubernetes.io/actions.ssl-redirect`),
-which `--set` misparses, so this Application needs a `helm.values` block and not just
-parameters — the mechanism already used for `prow-build-cluster-connection`. The static parts
-(ingress annotations, `github.bot`, `buildCluster.enabled`/`name`, `scrapeMetrics`, serviceAccount
-names) should follow the same rule as everything else and become chart defaults, leaving only the
-per-environment scalars to Terraform. Note `reconcileStrategy: ChartVersion` on this HelmRelease:
-template edits are ignored until `Chart.yaml` `version` bumps (see Traps), which will bite while
-iterating on the Flux side.
+**The value mapping is done too, and it needed no `helm.values` block** — 12 parameters and
+nothing else, which took two changes to earn:
+
+- The 13 image references are composed by the chart, as above.
+- The ALB annotations moved into the chart as defaults. Two of them are JSON containing commas
+  (`alb.ingress.kubernetes.io/actions.ssl-redirect`, `listen-ports`), which `--set` reads as list
+  separators, so leaving them in the Application would have forced a `values` block. The one
+  per-environment annotation, the external-dns hostname, is now composed in the Ingress template
+  from `prow.domain` — which that template already used as the host.
+
+Everything else static followed the same rule applied five times now: the `github.bot` identity,
+`buildCluster.enabled`/`name`, the `scrapeMetrics` flags and the eight serviceAccount names are
+chart defaults. The HelmRelease still passes them identically while stages remain on Flux.
+
+`buildCluster.clusterName` is deliberately **not** passed. Its only consumer,
+`build-cluster-kubeconfig-ConfigMap.yaml`, is gated on `buildCluster.server`, which nothing sets
+any more — the connection Job writes that ConfigMap instead (D16). So the value is unused, and
+Terraform never has to compose a string naming the build cluster, which is why D13 does not arise
+on the largest path.
+
+Two parameter names could not match their keys (`github.organisation`, `imageMirror.accountId`,
+and the rest), so `bootstrap/argocd-applications.tf` gained a `value_paths` map alongside `values`:
+the parameter name is the chart path and `--set` reads the dots as a path, which is what is wanted.
+
+Verified three ways. Rendering the chart with the HelmRelease's values is identical before and
+after (37 objects), so Flux stages are untouched. Rendering with only the 12 parameters is
+identical to rendering with the HelmRelease's full values. And all 12 parameter values match what
+`self-managed-vars` substitutes today, checked against the live ConfigMap rather than assumed —
+worth doing, since two of them (`kubernetesOrg`, `redhatOrg`) are `ack-prow-staging` in this
+environment rather than the upstream names a reader would guess.
+
+Still note `reconcileStrategy: ChartVersion` on this HelmRelease: template edits are ignored until
+`Chart.yaml` `version` bumps (see Traps), which bites while iterating on the Flux side.
 
 ### `secrets`: two gaps, and the second is not "read"
 
@@ -300,8 +324,7 @@ on first sync, with no `ignoreDifferences` added pre-emptively, per the rule abo
 | item | blocker |
 |---|---|
 | the four converted paths | push, `terraform apply`, then cut over. No code left to write; see the two sections below for their specifics |
-| ~~`prow-data-plane`~~ | **done**, and it was free: zero tokens, and its eight values were one static string repeated, now chart defaults. See below |
-| `prow-charts` → `prow-config` | the last real conversion, and **not** the value-mapping exercise it looked like. See below |
+| ~~`prow-charts`~~ → ~~`prow-config`~~, ~~`prow-data-plane`~~ | **done.** The data-plane half was free; `prow-config` needed a chart change plus 12 parameters and no `values` block. See below |
 | ~~`prow-crds`, `prometheus-dashboards`~~ | **done.** Both were genuinely just an Application each — see below |
 | ~~`secrets`~~ | **done**, and it cost the widest grant in the migration. Take the exit condition — see below |
 | `prometheus` | zero tokens, and **not an Application either.** The path contains only a `HelmRepository` + `HelmRelease` for upstream `kube-prometheus-stack` 84.5.0, so migrating means an Application whose source is that Helm repo, which needs the repo added to the AppProject's `sourceRepos` (currently the GitHub repo only). Its ~200-line `values` block, including the Prow recording rules, has to go somewhere: the clean route is a multi-source Application with a `$values` ref at `flux/prometheus/values.yaml`, which nothing else here uses. It also installs many CRDs, so the `prow-crds` in-cluster exception probably has to widen |

@@ -92,6 +92,19 @@ locals {
     # currently has zero occurrences in that file. Kept because dropping it would change the
     # Job's behaviour on a path being migrated; worth removing from both once confirmed dead.
     controllerEcrRegistry = "public.ecr.aws/${local.controller_ecr_alias}"
+
+    # For prow-config. Plain per-environment scalars the HelmRelease used to substitute.
+    stage         = var.stage
+    kubernetesOrg = var.kubernetes_org
+    redhatOrg     = var.redhat_org
+
+    # Composed here rather than in the chart, because both name resources on the HUB, which
+    # Terraform owns and bootstraps. Contrast buildCluster.clusterName, which names the build
+    # cluster: the chart does not need it (its only consumer is gated on buildCluster.server,
+    # which nothing sets since the connection Job took over that ConfigMap), so nothing has to
+    # compose it and D13 never comes up.
+    ecrPublicReaderRoleArn = "arn:${local.partition}:iam::${var.publish_account_id}:role/ArtifactReader"
+    prowLogsBucketName     = "${local.stack_name}-prow-logs-${local.account_id}"
   }
 
   # One entry per converted chart path. `values` lists which parameters that chart
@@ -208,6 +221,47 @@ locals {
       # RBAC and a Job. There is no AWS resource behind any of it, so Argo CD reasserting
       # desired state cannot fight ACK or overwrite someone mid-diagnosis of AWS state.
       self_heal = true
+    }
+    prow-config = {
+      # Prow itself: deck, hook, tide, plank, crier, sinker, horologium, statusreconciler,
+      # ghproxy, the Ingress and the config ConfigMap. The highest blast radius here.
+      #
+      # PARAMETERS ONLY, no helm.values, which took two changes to earn. The 13 component image
+      # references are composed by the chart from imageMirror, because PROW_VERSION and
+      # PROW_PATCH_REVISION are git-authored and not Terraform's to know. And the ALB annotations
+      # - two of which are JSON containing commas that --set would misparse as list separators -
+      # moved into the chart as defaults, with the one per-environment annotation
+      # (external-dns hostname) composed from prow.domain. What is left is all scalars.
+      #
+      # Everything static went to chart defaults on the same rule applied four times before:
+      # ingress annotations, the github.bot identity, buildCluster.enabled/name, the scrapeMetrics
+      # flags and the eight serviceAccount names. The HelmRelease still passes them identically
+      # while stages remain on Flux.
+      #
+      # buildCluster.clusterName is deliberately NOT passed. Its only consumer,
+      # build-cluster-kubeconfig-ConfigMap.yaml, is gated on buildCluster.server, which nothing
+      # sets any more - the prow-build-cluster-connection Job writes that ConfigMap instead (D16).
+      # So the value is unused, and Terraform never has to compose a string naming the build
+      # cluster.
+      path             = "prow/config"
+      target_namespace = "prow"
+
+      values = ["controllerEcrRegistry", "stage", "kubernetesOrg", "redhatOrg", "ecrPublicReaderRoleArn"]
+
+      # Chart paths whose value name differs from the key in argocd_chart_values.
+      value_paths = {
+        "imageMirror.accountId"               = "accountId"
+        "imageMirror.region"                  = "region"
+        "ecrPublicAccountId"                  = "publishAccountId"
+        "github.organisation"                 = "testInfraOrg"
+        "prow.domain"                         = "prowDomain"
+        "prow.presubmitsBucketName"           = "prowLogsBucketName"
+        "prow.tideStatusReconcilerBucketName" = "prowLogsBucketName"
+      }
+
+      # NOT cut over. Manual sync until the first sync confirms every object kept its uid. This is
+      # the path where that matters most: the nine Deployments carry immutable spec.selector, and a
+      # recreate would take Prow's control plane down rather than roll it.
     }
     prow-data-plane = {
       # Half of prow-charts, and the easy half: five Roles and five RoleBindings in test-pods
@@ -449,12 +503,26 @@ resource "kubernetes_manifest" "argocd_application" {
             {
               # Parameters, not a values file: these are per-environment and Terraform is
               # the only thing that knows them.
-              parameters = [
-                for k in lookup(each.value, "values", []) : {
-                  name  = k
-                  value = local.argocd_chart_values[k]
-                }
-              ]
+              #
+              # `values` covers the common case where the chart's value name matches the key in
+              # argocd_chart_values. `value_paths` handles the rest: a chart whose value lives at
+              # a path, like github.organisation or imageMirror.accountId, where the parameter
+              # name and the key cannot be the same string. --set reads the dots as a path, which
+              # is exactly what is wanted.
+              parameters = concat(
+                [
+                  for k in lookup(each.value, "values", []) : {
+                    name  = k
+                    value = local.argocd_chart_values[k]
+                  }
+                ],
+                [
+                  for path, k in lookup(each.value, "value_paths", {}) : {
+                    name  = path
+                    value = local.argocd_chart_values[k]
+                  }
+                ]
+              )
             },
             # values carries anything --set cannot express - currently only the test_config
             # content for prow-build-cluster-connection, whose `.` and `,` characters --set
