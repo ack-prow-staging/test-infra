@@ -209,6 +209,23 @@ locals {
       # desired state cannot fight ACK or overwrite someone mid-diagnosis of AWS state.
       self_heal = true
     }
+    prow-data-plane = {
+      # Half of prow-charts, and the easy half: five Roles and five RoleBindings in test-pods
+      # that let crier, deck, hook, prow-controller-manager and sinker reach test pods.
+      #
+      # ZERO TOKENS and no values here. Its HelmRelease values block was eight identical static
+      # strings, so they moved into prow/data-plane/values.yaml as chart defaults - the
+      # prow-mirror rule: static git-authored values belong with the structure, not in
+      # Terraform. Argo CD detects Helm from Chart.yaml and uses those defaults, so this entry
+      # needs no `values` and therefore emits no `helm` block.
+      #
+      # The other half, prow-config, is NOT here and is not a value-mapping exercise: 13 of its
+      # tokens compose component image references from PROW_VERSION and PROW_PATCH_REVISION,
+      # which are git-authored and deliberately not Terraform's to know. Composing them has to
+      # move into the chart. See docs/argocd-migration.md.
+      path             = "prow/data-plane"
+      target_namespace = "test-pods"
+    }
     # The two token-free paths. NOTHING IS CONVERTED FOR THESE.
     #
     # Both are plain kustomize directories with no ${TOKEN} anywhere, so there was nothing for

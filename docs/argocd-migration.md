@@ -14,9 +14,9 @@ own suspension, `bootstrap/argocd-applications.tf` explains the Application shap
 | Kustomizations / HelmReleases Ready | 26/26, 17/17 |
 | Argo CD Applications | **12 live**, all Synced/Healthy. **16 declared**: 15 by Terraform, all hub-targeted, plus `prow-build-cluster-resources` which is build-cluster-targeted and therefore composed by the connection chart and applied by its Job, never by Terraform (D13). Verified: all 15 render with the exact values Terraform supplies |
 | Cut over | **12** paths, all `automated`, prune off everywhere |
-| Wired, not live | **6** — `prow-build-cluster-resources`, `prow-agent-workflows`, `prow-plugins`, `prow-jobs` (charts written), plus `prow-crds` and `prometheus-dashboards` (no conversion needed — Argo CD reads the same kustomize directory). All verified against live objects; awaiting push, apply and cutover |
+| Wired, not live | **7** — `prow-build-cluster-resources`, `prow-agent-workflows`, `prow-plugins`, `prow-jobs` (charts written), `prow-crds` and `prometheus-dashboards` (no conversion needed), `prow-data-plane` (values moved to chart defaults). All verified against live objects; awaiting push, apply and cutover |
 | ACK CRs | 64, all Argo CD-tracked, 0 deleting |
-| Still on Flux, not started | **3** — `prow-charts` (12 tokens, the substantial one), `secrets` (cluster-wide RBAC), `prometheus` (upstream chart source). See *What is left* |
+| Still on Flux, not started | **3** — `prow-config` (13 composed image refs, needs a chart change), `secrets` (cluster-wide RBAC decision), `prometheus` (upstream chart source). See *What is left* |
 | Clusters registered | 2 — hub, plus the build cluster as a spoke |
 
 `Synced` was never progress on its own. An Application whose objects are all Helm hooks has
@@ -173,6 +173,43 @@ substitution — a cluster-wide RBAC grant and an upstream chart source respecti
 means Argo CD can *render* a path; it does not mean Argo CD is allowed to apply it, or that the
 path is even a git directory.
 
+### `prow-charts` splits unevenly, and `prow-config` is not a value-mapping job
+
+`prow-charts` looked like one item. It is two HelmReleases with nothing in common.
+
+**`prow-data-plane` is done and cost nothing.** Zero tokens; its values block was
+`region: us-west-2` plus the same ServiceAccount name eight times. Those moved into
+`prow/data-plane/values.yaml` as chart defaults — the `prow-mirror` rule that static
+git-authored values belong with the structure rather than in Terraform. Verified: rendering from
+chart defaults alone is **byte-identical** to rendering with the HelmRelease's explicit values,
+and all ten objects (five Roles, five RoleBindings in `test-pods`) match live content. So the
+change is inert for stages still on Flux, which keep passing the same values explicitly. The
+Application needs no `values`, and therefore no `helm` block.
+
+**`prow-config` is the one piece of real work left, and the obvious approach does not work.**
+Its 25 token occurrences are not 25 independent values:
+
+| token | count | what it is |
+|---|---|---|
+| `ACCOUNT_ID`, `REGION`, `PROW_VERSION`, `PROW_PATCH_REVISION` | 13 each (15 for `ACCOUNT_ID`) | the **same composed image reference**, 13 times: `${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/prow/<component>:${PROW_VERSION}-ack.${PROW_PATCH_REVISION}` |
+| `STACK_NAME` ×3, `PROW_DOMAIN` ×2, `PUBLISH_ACCOUNT_ID` ×2 | 7 | bucket names, ingress hostname, ECR reader role |
+| `CONTROLLER_ECR_REGISTRY`, `KUBERNETES_ORG`, `REDHAT_ORG`, `STAGE`, `TEST_INFRA_ORG` | 1 each | plain scalars |
+
+Terraform cannot simply pass the 13 image strings as parameters, because it cannot compose them:
+`PROW_VERSION` and `PROW_PATCH_REVISION` are git-authored, live in
+`flux/prow/version/prow-version-configmap.yaml`, and are deliberately **not** Terraform's to
+know — that is the `prow-mirror` precedent, which this repo has now applied three times. So the
+composition has to move **into the `prow/config` chart**: it takes `accountId`, `region`,
+`prowVersion` and `prowPatchRevision` and builds the 13 references itself, with the two version
+values as chart defaults.
+
+That is a change to the chart that renders Prow's ten components — deck, hook, tide, plank,
+crier, sinker, horologium, statusreconciler, ghproxy and the utility images. It is mechanical but
+it is the highest-blast-radius chart in the repo, so it wants its own session and a careful
+byte-comparison against the live Deployments, not the tail of another change. Note also
+`reconcileStrategy: ChartVersion` on this HelmRelease: template edits are ignored until
+`Chart.yaml` `version` bumps (see Traps), which will bite while iterating.
+
 ### The token-free paths need no conversion at all
 
 `prow-crds` and `prometheus-dashboards` are now wired, and they are the first paths that
@@ -205,7 +242,8 @@ on first sync, with no `ignoreDifferences` added pre-emptively, per the rule abo
 | item | blocker |
 |---|---|
 | the four converted paths | push, `terraform apply`, then cut over. No code left to write; see the two sections below for their specifics |
-| `prow-charts` → `prow-config`, `prow-data-plane` | **the substantial one, and previously unlisted.** These two HelmReleases carry the Prow components themselves and 12 distinct tokens across 25 occurrences in their `values` blocks, substituted by `prow-charts`' `postBuild`. The charts already exist (`prow/config`, `prow/data-plane`) so no chart work is needed — the work is moving ~40 values from HelmRelease `values` into Application `helm`, and `reconcileStrategy: ChartVersion` on both means template edits are ignored until `Chart.yaml` `version` bumps (see Traps) |
+| ~~`prow-data-plane`~~ | **done**, and it was free: zero tokens, and its eight values were one static string repeated, now chart defaults. See below |
+| `prow-charts` → `prow-config` | the last real conversion, and **not** the value-mapping exercise it looked like. See below |
 | ~~`prow-crds`, `prometheus-dashboards`~~ | **done.** Both were genuinely just an Application each — see below |
 | `secrets` | zero tokens, but **not** cheap. `secrets-store-rbac.yaml` is a ClusterRole granting `secrets` create/delete/get/list/patch/update/watch **cluster-wide**, plus its binding. Escalation prevention means Argo CD must hold that itself to create it, and cluster-wide secrets write is a materially bigger grant than the `prow-plugins` one — it is read access to every Secret in the cluster. The narrowing option is much more attractive here: the binding's only subject is the `secrets-store-csi-driver` ServiceAccount, so scope it to the namespaces that actually need it. Do not repeat the `prow-plugins` decision by reflex |
 | `prometheus` | zero tokens, and **not an Application either.** The path contains only a `HelmRepository` + `HelmRelease` for upstream `kube-prometheus-stack` 84.5.0, so migrating means an Application whose source is that Helm repo, which needs the repo added to the AppProject's `sourceRepos` (currently the GitHub repo only). Its ~200-line `values` block, including the Prow recording rules, has to go somewhere: the clean route is a multi-source Application with a `$values` ref at `flux/prometheus/values.yaml`, which nothing else here uses. It also installs many CRDs, so the `prow-crds` in-cluster exception probably has to widen |
