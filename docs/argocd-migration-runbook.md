@@ -226,7 +226,151 @@ not remove, which must be deleted by hand** (see Manual steps).
 
 ### Stage 7 — Flux removal
 
-Not yet executed on staging. This section will be filled in from that run.
+Irreversible. Deleting the suspended HelmReleases and Kustomizations removes the reversal
+switches, so after this, going back to Flux means re-deriving them from git history.
+
+Merge: `feat(argocd): Remove Flux`, `chore(bootstrap): Remove Terraform's Flux footprint`.
+
+**Order matters more here than anywhere else, and one ordering is not obvious — see 7.5.**
+
+#### 7.1 Scale the controllers down before touching any CR
+
+```bash
+kubectl --context $CTX -n flux-system get deploy -o name | \
+  xargs -I{} kubectl --context $CTX -n flux-system scale {} --replicas=0
+```
+
+With no controller running, no finalizer can prune or uninstall regardless of what any spec
+says. Belt-and-braces once prune is off everywhere, but it costs nothing.
+
+#### 7.2 Clear finalizers, then delete the CRs
+
+The two steps are in this order *because* the controllers are down: a finalizer with no
+controller to process it blocks deletion forever.
+
+```bash
+for kind in helmreleases.helm.toolkit.fluxcd.io kustomizations.kustomize.toolkit.fluxcd.io \
+            helmcharts.source.toolkit.fluxcd.io gitrepositories.source.toolkit.fluxcd.io; do
+  kubectl --context $CTX get $kind -A \
+    -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' | \
+  while IFS=/ read ns name; do
+    [ -n "$name" ] && kubectl --context $CTX -n "$ns" patch $kind "$name" \
+      --type=merge -p '{"metadata":{"finalizers":null}}'
+  done
+done
+# then delete every Flux kind, including the ones with no instances
+```
+
+**Verify finalizers are actually clear before deleting**, and re-read if the answer looks
+inconsistent — the API served a stale list once during the staging run, showing finalizers
+that had already been removed.
+
+#### 7.3 Verify nothing else moved
+
+This is the moment a missed `prune: true` would show up.
+
+```bash
+# uids must be unchanged, counts must match the Stage 0 baseline
+kubectl --context $CTX -n prow get deploy -o json | python3 -c 'import json,sys; print(sorted((d["metadata"]["name"],d["metadata"]["uid"]) for d in json.load(sys.stdin)["items"]))'
+kubectl --context $CTX get ns; kubectl --context $CTX -n ack-system get crds 2>/dev/null
+kubectl --context $CTX -n argocd get applications.argoproj.io
+```
+
+Staging: 10/10 Prow Deployment uids held, ProwJob CRD held, 11 namespaces held, 23 ACK CRs
+intact, 172/172 Argo CD-tracked objects still tracked.
+
+#### 7.4 Delete Flux itself
+
+```bash
+kubectl --context $CTX get crds -o name | grep toolkit.fluxcd.io | xargs -r kubectl --context $CTX delete
+kubectl --context $CTX delete clusterrole crd-controller flux-edit flux-view --ignore-not-found
+kubectl --context $CTX delete clusterrolebinding cluster-reconciler crd-controller --ignore-not-found
+kubectl --context $CTX delete ns flux-system
+```
+
+**A CRD can hang on an orphaned CR in a namespace that no longer exists.** Staging hit this:
+`gitrepositories.source.toolkit.fluxcd.io` sat in `Terminating` on its
+`customresourcecleanup` finalizer because one GitRepository remained in a deleted namespace —
+readable, but every write rejected with `namespaces "..." not found`. The fix is to recreate
+the namespace, clear the CR's finalizer, then delete both:
+
+```bash
+kubectl --context $CTX create namespace <the-missing-namespace>
+kubectl --context $CTX -n <the-missing-namespace> patch gitrepository <name> \
+  --type=merge -p '{"metadata":{"finalizers":[]}}'
+kubectl --context $CTX delete namespace <the-missing-namespace>
+```
+
+#### 7.5 Remove from git BEFORE deleting Flux's ACK CRs
+
+**This is the step whose order is easy to get wrong, and staging got it wrong.** Flux's own
+AWS footprint is declared in charts that Argo CD now reconciles:
+
+- the `ghcr.io/fluxcd` pull-through cache rule (the `ack-flux` chart)
+- the kustomize-controller `PodIdentityAssociation`, its build-cluster `AccessEntry` and the
+  IAM role behind it (all in `ack-build-infra`)
+
+Delete those CRs while they are still in a synced Application's desired state and **Argo CD
+recreates them within seconds** — `automated` is on. Push the git removal first, hard-refresh
+the owning Application, confirm the objects are no longer in its desired state, and only then
+delete them. They will then show as extraneous rather than missing, and stay deleted.
+
+Refresh the **owning Application directly**. Refreshing the root does not re-render its
+children.
+
+Then, in dependency order:
+
+```bash
+# 1. pod identity association -- it references the IAM role
+# 2. the access entry CR
+# 3. the AWS access entry, explicitly, IF its CR carried deletion-policy: retain
+aws eks delete-access-entry --cluster-name <build-cluster> --principal-arn <flux-role-arn>
+# 4. the IAM role CR -- after the entry, or the entry is left naming a principal that is gone
+# 5. the pull-through cache rule CR
+```
+
+Check `services.k8s.aws/deletion-policy` on each first. On staging the access entry was
+`retain` and the other three were not, so only that one needed an explicit AWS delete.
+
+**Also delete the orphaned Application.** Removing the `ack-flux` entry from the chart stops
+the root rendering it, but Argo CD cannot delete Applications — `argocd-rbac.tf` grants
+get/create/update/patch and no delete — so it lingers, pointing at a path that no longer
+exists. Delete it by hand.
+
+#### 7.6 Terraform
+
+`flux.tf` goes entirely. Watch for things that outlive it:
+
+- **any script reading `self-managed-vars`.** `bootstrap-prow-images.sh` read four values from
+  it; that ConfigMap was Flux's substitution source and went with the namespace, so the script
+  would have failed on the next fresh bootstrap. Pass the values from the provisioner instead.
+- **`depends_on` edges into `null_resource.validate_kustomizations`**, which polled Flux
+  Kustomizations. `swap_nodepool` had one. Nothing replaces it: what it waited for is now
+  delivered by an Application, which Terraform cannot observe. Check the script polls for
+  itself before dropping the gate — `swap-nodepool.sh` does.
+- **the node role's ECR pull-through-cache policy**, scoped to `repository/fluxcd/*`.
+- **the `ghcr-fluxcd` Secret lookup** and the `ghcrPtcSecretArn` chart value that fed
+  `ack-flux`.
+- **`var.flux_version`**, its `tfvars` entry, and any prompt reading a default from a deleted
+  file (`bootstrap-env.sh` read one out of `flux/flux/version-configmap.yaml`).
+
+The `kubernetes_config_map_v1` resources for `self-managed-vars` and `flux-version` need no
+special handling: their namespace is already gone, so refresh drops them from state and they do
+not appear in the plan.
+
+**Gate:** `terraform plan` clean, `terraform state list | grep -i flux` empty, and every
+remaining mention of "flux" in `bootstrap/` is a comment.
+
+#### 7.7 What legitimately stays
+
+The **charts** live under `flux/` — `flux/ack/charts/`, `flux/prow/charts/`, `flux/prow/crds/`
+and `flux/secrets/` are Argo CD Application sources. Only the Kustomization and HelmRelease
+*definitions* are deleted. The directory name is now a misnomer; renaming it means touching
+every Application path and is a separate change.
+
+Staging end state: 21 Applications Synced and Healthy, 10 Prow Deployments available, zero Flux
+CRDs, zero Flux namespaces, zero Flux cluster RBAC, no Flux access entries or pull-through cache
+rules in AWS, and a clean `terraform plan`.
 
 ---
 
@@ -268,6 +412,14 @@ cutover reversible and also what leaves debris.
 | 6 | 10 `monitoring.coreos.com` CRDs | Helm never deletes CRDs installed from a chart's `crds/` directory |
 | 6 | `prometheus-prometheus-kube-admission` Secret | written by a chart *hook*, so it was never part of the release |
 | 2 | the six objects the connection chart left in its old namespace | moving a namespace is a recreate, not an adoption |
+| 7 | Flux's ACK CRs — cache rule, pod identity, access entry, IAM role | declared in charts Argo CD reconciles; **push the git removal first or `automated` recreates them** |
+| 7 | the retained AWS access entry | its CR carried `deletion-policy: retain`, so ACK leaves the AWS object |
+| 7 | the orphaned `ack-flux` Application | Argo CD has no `delete` on Applications, so a removed entry lingers |
+| 7 | Flux CRDs, cluster RBAC, the `flux-system` namespace | never owned by any Application |
+
+**The recurring shape:** `prune: false` is what makes every cutover reversible, and it is also
+what leaves debris at every step. Nothing on this list is deleted by merging. Budget for a
+sweep after each stage rather than discovering them months later by grepping for a label.
 
 Before deleting a namespace or CRD, confirm nothing remains that depends on it:
 
