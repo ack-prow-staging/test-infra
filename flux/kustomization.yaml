@@ -7,4 +7,8 @@ resources:
 - ack-build-cluster.yaml
 - secrets.yaml
 - prow.yaml
-- argocd.yaml
+# argocd.yaml was here. The Argo CD capability's in-cluster RBAC is Terraform's now
+# (bootstrap/argocd-rbac.tf), because Argo CD cannot apply the objects that authorise
+# Argo CD and Flux is being removed. Its objects were adopted by `terraform import`,
+# not recreated, and this Kustomization had prune: false, so dropping it here removes
+# the Kustomization and leaves the grants in place.
