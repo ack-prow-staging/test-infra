@@ -418,8 +418,8 @@ copied into Terraform, re-synced on every chart upgrade, with drift silent. AWS-
 to weigh first.
 
 Two measurements worth keeping so they are not redone: the chart is 7.2 MB unpacked across 297 files
-and five subcharts, so vendoring it into `charts/` — the house pattern, per `charts/flux2-2.18.4`
-and `scripts/pull-flux-chart.sh` — would be 12× the flux2 chart. And a multi-source Application with
+and five subcharts, so vendoring it into `charts/` — the house pattern at the time, which
+existed to vendor the flux2 chart and was removed with Flux — would have been 12× that chart. And a multi-source Application with
 a `$values` ref avoids vendoring but adds the repo's first multi-source Application, needs the Helm
 repo in the AppProject's `sourceRepos`, and assumes the managed capability's repo-server has egress
 to a third-party Helm repo, which was never verified. Vendoring depends on nothing but git.
