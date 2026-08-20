@@ -682,6 +682,54 @@ HelmRelease plus a manual-sync Application means nothing reconciles that path.
 
 Do not merge this until Stage 4's gate passed for *every* path.
 
+#### Five suspends will not be delivered, and must be applied by hand here
+
+**The problem, carried forward from Stage 2.** `prow-charts` is held at an old revision by
+`dependsOn: prow-build-cluster-connection`, whose HelmRelease can never become Ready under Flux (see
+Stage 2). A blocked Kustomization applies nothing, and `prow-charts` owns exactly the five objects this
+stage needs to change:
+
+```
+prow-config           HelmRelease
+prow-data-plane       HelmRelease
+prow-agent-workflows  Kustomization
+prow-jobs             Kustomization
+prow-plugins          Kustomization
+```
+
+So merging this stage declares `suspend: true` for them in git and **nothing applies it.** Left
+undetected, that is the worst state in the migration: Argo CD has `automated` on while helm-controller
+is still reconciling `prow-config`, so both own Prow's Deployments.
+
+**Apply those five imperatively, and note why that is safe here rather than the usual mistake.** The
+guide says elsewhere that an imperative suspend is silently reverted, because the owning Kustomization
+re-applies the spec on its next reconcile. That is exactly what cannot happen while `prow-charts` is
+blocked — the reverting mechanism is the thing that is stuck. And git already agrees, so when
+`prow-charts` eventually unblocks at Stage 7 it re-applies the same value:
+
+```bash
+for hr in prow-config prow-data-plane; do
+  kubectl --context $CTX -n flux-system patch helmrelease $hr \
+    --type=merge -p '{"spec":{"suspend":true}}'
+done
+for k in prow-agent-workflows prow-jobs prow-plugins; do
+  kubectl --context $CTX -n flux-system patch kustomization $k \
+    --type=merge -p '{"spec":{"suspend":true}}'
+done
+```
+
+Verify against git rather than assuming — every path this stage suspends must read `true` live:
+
+```bash
+kubectl --context $CTX get helmreleases.helm.toolkit.fluxcd.io,kustomizations.kustomize.toolkit.fluxcd.io \
+  -A -o custom-columns='KIND:.kind,NAME:.metadata.name,SUSPEND:.spec.suspend' | grep -v '<none>'
+```
+
+The alternative, dropping the `dependsOn` edge so `prow-charts` reconciles again, is a smaller change
+but a code change outside this sequence. It was rejected for prod: the edge exists so the kubeconfig
+lands before Prow's components mount it, and editing dependency graphs mid-cutover trades a known
+problem for an unknown one.
+
 **Gate:**
 
 ```bash
