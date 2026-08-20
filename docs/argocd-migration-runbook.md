@@ -532,10 +532,27 @@ and `valuesFrom` reads only ConfigMaps and Secrets. Only Terraform can supply it
 The subtlety worth knowing: **shipping the chart change and its `suspend: true` in the same commit
 does not prevent one upgrade attempt.** helm-controller picks up the new chart revision and runs the
 upgrade before, or despite, the suspend landing; the attempt fails, and because the HelmRelease is then
-suspended nothing ever retries, so it stays `Ready=False` permanently. With `wait: true` on its
-Kustomization that holds every dependent — on prod, `prow-charts`, `prometheus` and
-`prometheus-dashboards`. Those paths stop *reconciling*; their objects stay live and healthy, which is
-why Prow is unaffected. It clears at Stage 5, when these HelmReleases are deleted.
+suspended nothing ever retries, so it stays `Ready=False` permanently.
+
+**Accept that, and remove the `dependsOn` edge that makes it contagious.** With `wait: true` on its
+Kustomization, a permanently unhealthy path holds every dependent — on prod that was `prow-charts`, and
+through it `prometheus` and `prometheus-dashboards`, all pinned at a stale revision and unable to apply
+anything. `prow-charts` owns the objects Stage 5 suspends, so that has to be fixed before the cutover,
+not during it:
+
+```bash
+# in flux/prow.yaml, prow-charts should depend on prow-mirror only
+kubectl --context $CTX -n flux-system get kustomization prow-charts \
+  -o jsonpath='{.spec.dependsOn[*].name}{"\n"}{.status.lastAppliedRevision}{"\n"}'
+```
+
+The edge existed so `prow-charts` waited for the connection Job to produce `build-cluster-kubeconfig`.
+That ConfigMap exists, and Argo CD's Application of the same name produces it from Stage 5 — so the edge
+waits on a path Flux no longer owns. Do **not** reach for `wait: false` or hand-applied suspends
+instead; both are recorded under Stage 5 with why they are worse.
+
+The path itself stays `Ready=False` under Flux for good, by design. Its objects — the kubeconfig
+ConfigMap, the Job, its RBAC — remain live, and Argo CD adopts them at Stage 4.
 
 ```bash
 # distinguish "not reconciling" from "not working" before treating either as a problem
@@ -751,12 +768,24 @@ whose Application cannot sync leaves that path reconciled by nothing.
 
 Do not merge this until Stage 4's gate passed for *every* path.
 
-#### Five suspends will not be delivered, and must be applied by hand here
+#### Confirm prow-charts can actually apply before merging this
 
-**The problem, carried forward from Stage 2.** `prow-charts` is held at an old revision by
-`dependsOn: prow-build-cluster-connection`, whose HelmRelease can never become Ready under Flux (see
-Stage 2). A blocked Kustomization applies nothing, and `prow-charts` owns exactly the five objects this
-stage needs to change:
+**Resolved on prod, but check it rather than assume.** This stage delivers its suspends through the
+Kustomizations that own them, so any of those held at a stale revision silently swallows the change.
+`prow-charts` was in exactly that state after Stage 2 and had to be fixed before this stage could work
+— see *A stale dependsOn edge can swallow this stage's suspends* below.
+
+```bash
+# every Kustomization that owns something this stage suspends must be at current main
+kubectl --context $CTX -n flux-system get kustomizations.kustomize.toolkit.fluxcd.io \
+  -o custom-columns='NAME:.metadata.name,REV:.status.lastAppliedRevision,READY:.status.conditions[?(@.type=="Ready")].status'
+```
+
+#### A stale dependsOn edge can swallow this stage's suspends
+
+`prow-charts` owns the five objects below, and it waited on `prow-build-cluster-connection`, whose
+HelmRelease can never become Ready under Flux (see Stage 2). A blocked Kustomization applies nothing,
+so the suspends declared here never reached:
 
 ```
 prow-config           HelmRelease
@@ -766,38 +795,30 @@ prow-jobs             Kustomization
 prow-plugins          Kustomization
 ```
 
-So merging this stage declares `suspend: true` for them in git and **nothing applies it.** Left
-undetected, that is the worst state in the migration: Argo CD has `automated` on while helm-controller
-is still reconciling `prow-config`, so both own Prow's Deployments.
+Left undetected that is the worst state in the migration: Argo CD has `automated` on while
+helm-controller is still reconciling `prow-config`, so both own Prow's Deployments.
 
-**Apply those five imperatively, and note why that is safe here rather than the usual mistake.** The
-guide says elsewhere that an imperative suspend is silently reverted, because the owning Kustomization
-re-applies the spec on its next reconcile. That is exactly what cannot happen while `prow-charts` is
-blocked — the reverting mechanism is the thing that is stuck. And git already agrees, so when
-`prow-charts` eventually unblocks at Stage 7 it re-applies the same value:
+**The fix is to remove the stale edge, not to work around it.** `prow-charts` waited on that path so it
+would block until the connection Job had produced the `build-cluster-kubeconfig` ConfigMap that four
+Prow components mount. That ConfigMap exists, and from this stage onward the Argo CD Application of the
+same name produces it — so the edge waits on a path Flux no longer owns, exactly like the `depends_on`
+edges into `null_resource.validate_kustomizations`. Dropping it restored `prow-charts` to current
+`main` on prod within a minute, and everything behind it followed.
 
-```bash
-for hr in prow-config prow-data-plane; do
-  kubectl --context $CTX -n flux-system patch helmrelease $hr \
-    --type=merge -p '{"spec":{"suspend":true}}'
-done
-for k in prow-agent-workflows prow-jobs prow-plugins; do
-  kubectl --context $CTX -n flux-system patch kustomization $k \
-    --type=merge -p '{"spec":{"suspend":true}}'
-done
-```
+Two workarounds were tried first and are worth not repeating:
 
-Verify against git rather than assuming — every path this stage suspends must read `true` live:
+- **`wait: false` on the blocked path.** Makes a failed release report as healthy and gives `wait` a
+  different meaning on one path than everywhere else. It silences the check instead of fixing the cause.
+- **Hand-applying the five suspends with `kubectl`.** Works only because the mechanism that would revert
+  them is the thing that is stuck, which is too clever to rely on, and it leaves git and the cluster
+  agreeing by coincidence rather than by construction.
 
-```bash
-kubectl --context $CTX get helmreleases.helm.toolkit.fluxcd.io,kustomizations.kustomize.toolkit.fluxcd.io \
-  -A -o custom-columns='KIND:.kind,NAME:.metadata.name,SUSPEND:.spec.suspend' | grep -v '<none>'
-```
-
-The alternative, dropping the `dependsOn` edge so `prow-charts` reconciles again, is a smaller change
-but a code change outside this sequence. It was rejected for prod: the edge exists so the kubeconfig
-lands before Prow's components mount it, and editing dependency graphs mid-cutover trades a known
-problem for an unknown one.
+**Making the blocked path healthy under Flux is possible but is not a state fix.** Its chart requires
+`testConfig` — the contents of `prow/jobs/test_config.yaml`, which only Terraform can supply via
+`file()` — and the Argo-CD-only parts of its Job (the spoke registration Secret, the AppProject patch,
+applying the Application) would all need guarding too, along with the `application` volume mount, which
+is not optional. That is a chart refactor touching a Job that runs against the cluster on every
+reconcile. It stays `Ready=False` under Flux by design; after this stage Argo CD owns the path.
 
 **Gate:**
 
