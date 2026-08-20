@@ -403,6 +403,33 @@ These are inert by construction: Flux keeps reconciling and keeps passing the sa
 charts render byte-identically to what the Kustomizations produced. Nothing in this stage requires
 Argo CD to exist.
 
+**With one deliberate exception: this stage stops managing the hub cluster.** The old
+`flux/ack/cluster/cluster.yaml` declared the hub's own `Cluster` CR and carried the last render-time
+cluster read in the repo, which Argo CD cannot satisfy — it renders off-cluster, so Helm's `lookup`
+returns empty. The chart therefore omits it, and no later stage re-adopts it: in the final state only
+`ack-build-infra` declares a `Cluster`, and that one is the *build* cluster's.
+
+So after this stage the live hub `Cluster` CR is declared nowhere. That is safe, and for three
+reasons worth confirming rather than assuming:
+
+- Stage 1 disabled prune, so nothing collects it
+- the CR carries `services.k8s.aws/deletion-policy: retain`, so even deleting it leaves the EKS
+  cluster alone
+- Terraform owns the actual cluster through `aws_eks_cluster.this`, so the CR was only ever an
+  adoption
+
+```bash
+kubectl --context $CTX -n ack-system get clusters.eks.services.k8s.aws \
+  -o custom-columns='NAME:.metadata.name,DELETION:.metadata.annotations.services\.k8s\.aws/deletion-policy'
+# the hub's own CR should read retain -- it becomes an orphan from here on
+```
+
+It is an eighth object with no owner, on top of the seven in `docs/argocd-migration.md`. Verifying
+"inert" per path is still worth doing, but expect this one difference and do not treat it as a
+regression: comparing `kustomize build` at the previous revision against `helm template` of the new
+chart shows every path identical except this CR, plus `external-dns-role` moving out of the `addons`
+path into the `addons/roles` path that already had its own Kustomization.
+
 **Gate:** all unsuspended Kustomizations `Ready=True`, and the Prow Deployment uids from Stage 0
 unchanged.
 
