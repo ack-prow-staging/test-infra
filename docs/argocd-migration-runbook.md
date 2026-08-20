@@ -510,8 +510,43 @@ check passes in milliseconds. The cascade then clears in a few minutes.
 Restarting `kustomize-controller` is low risk here: it is stateless, `prune` is off everywhere so
 nothing can be collected, and a pause in reconciliation changes nothing already running.
 
-**Gate:** all unsuspended Kustomizations `Ready=True`, and the Prow Deployment uids from Stage 0
-unchanged.
+#### Two Kustomizations cannot reach Ready in this stage, and both are expected
+
+Prod hit both. Neither is degradation — no object is deleted or changed — but the literal gate
+"all unsuspended Kustomizations `Ready=True`" cannot pass, so know which two before deciding whether
+to proceed.
+
+**`argocd-rbac` — `kustomization path not found: .../flux/argocd`.** `flux/argocd.yaml` declares a
+Kustomization pointing at `./flux/argocd`, and **no commit in the sequence creates that directory** —
+not the conversion commit that adds the declaration, not the Stage 3 commit that grants the same RBAC,
+not the final state. In staging its objects were adopted into Terraform by `terraform import`, so the
+directory only ever existed as live objects, never as committed files. It is harmless because prune is
+off: a path-not-found applies nothing. Stage 5 removes the declaration, and the live Kustomization
+object then lingers and needs hand deletion — it is on that list.
+
+**`prow-build-cluster-connection` — `Helm upgrade failed … testConfig is required`.** The chart it now
+renders cannot be rendered by Flux at all, as its own comment explains: it composes the
+`prow-build-cluster-resources` Application, which needs the *contents* of `prow/jobs/test_config.yaml`,
+and `valuesFrom` reads only ConfigMaps and Secrets. Only Terraform can supply it, via `file()`.
+
+The subtlety worth knowing: **shipping the chart change and its `suspend: true` in the same commit
+does not prevent one upgrade attempt.** helm-controller picks up the new chart revision and runs the
+upgrade before, or despite, the suspend landing; the attempt fails, and because the HelmRelease is then
+suspended nothing ever retries, so it stays `Ready=False` permanently. With `wait: true` on its
+Kustomization that holds every dependent — on prod, `prow-charts`, `prometheus` and
+`prometheus-dashboards`. Those paths stop *reconciling*; their objects stay live and healthy, which is
+why Prow is unaffected. It clears at Stage 5, when these HelmReleases are deleted.
+
+```bash
+# distinguish "not reconciling" from "not working" before treating either as a problem
+kubectl --context $CTX -n prow get deploy          # must still be fully available
+kubectl --context $CTX -n prow get configmap build-cluster-kubeconfig   # must still exist
+```
+
+**Gate — judge it on these, not on the Ready count:** the Prow Deployment uids from Stage 0 unchanged,
+no ACK CR recreated, and every Kustomization Ready except the two above. Expect the ACK CR count to
+rise by one: `AccessEntry/argocd-build-cluster-access` is new content from registering the build
+cluster, not a recreate.
 
 ```bash
 kubectl --context $CTX -n prow get deploy -o json | \
@@ -919,6 +954,7 @@ cutover reversible and also what leaves debris.
 | 7 | the retained AWS access entry | its CR carried `deletion-policy: retain`, so ACK leaves the AWS object |
 | 7 | the orphaned `ack-flux` Application | Argo CD has no `delete` on Applications, so a removed entry lingers |
 | 7 | Flux CRDs, cluster RBAC, the `flux-system` namespace | never owned by any Application |
+| 7 | the `argocd-rbac` Kustomization object | it points at `./flux/argocd`, which no commit creates, so it has been `Ready=False` since the conversion landed. Stage 5 removes the declaration but prune is off, so the object itself survives and must go by hand |
 | 7 | **the orphaned objects in `bootstrap-flux-system`**, if the environment has any — six Deployments, a `GitRepository`, a `Kustomization` | a second, namespace-scoped Flux that `bootstrap/scripts/bootstrap-flux.sh` installs to deploy the real one and is supposed to tear down. Prod still had it 84 days on, frozen. Declared nowhere in git, so no stage removes it. **Delete the objects, not the namespace: the `Namespace` object is already gone** (force-deleted, orphaning its contents), so `kubectl delete ns` fails and `get ns` wrongly reports nothing to clean. The `Kustomization` carries `prune: false`, so removing it collects nothing. Staging never had this — check rather than assume |
 
 **The recurring shape:** `prune: false` is what makes every cutover reversible, and it is also
