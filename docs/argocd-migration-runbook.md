@@ -437,6 +437,57 @@ regression: comparing `kustomize build` at the previous revision against `helm t
 chart shows every path identical except this CR, plus `external-dns-role` moving out of the `addons`
 path into the `addons/roles` path that already had its own Kustomization.
 
+#### Expect one HelmRelease to land in the wrong namespace
+
+This stage removes `targetNamespace: ack-system` from eight Kustomizations, and it has to: with it
+set, Flux rewrites the namespace of everything the path applies, including the `HelmRelease` object
+itself, which must stay in `flux-system`.
+
+**A child Kustomization's spec and the content it applies do not update atomically.** The parent
+applies the new `flux/ack.yaml` (dropping `targetNamespace`) while each child applies its own new
+`helm-release.yaml`, and a child that reconciles first still carries the old spec. It then rewrites
+the HelmRelease into `ack-system`, where `valuesFrom` cannot find `self-managed-vars` — that ConfigMap
+lives in `flux-system`:
+
+> `could not resolve ConfigMap chart values reference 'ack-system/self-managed-vars' with key
+> 'ACCOUNT_ID': configmaps "self-managed-vars" not found`
+
+On prod exactly one path lost this race, `ack-capability-role`, the first in the dependency chain.
+Because these Kustomizations carry `wait: true`, that single failure held **seventeen** dependents at
+`dependency ... is not ready`. Prow was never affected — it is not downstream of these paths — but the
+stage cannot pass its gate until it clears.
+
+```bash
+# the tell: a HelmRelease anywhere other than flux-system
+kubectl --context $CTX get helmreleases.helm.toolkit.fluxcd.io -A \
+  -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status'
+```
+
+**Fixing it needs a controller restart, not a nudge.** Suspend/resume and
+`reconcile.fluxcd.io/requestedAt` both appear to do nothing, and the reason is worth knowing: the
+Kustomization's health check is a *blocking wait inside the reconcile goroutine*, holding for the full
+timeout — `Running health checks for revision … with a timeout of 59m30s`. Mutating the resource does
+not interrupt a goroutine that is not re-reading it.
+
+```bash
+# 1. suspend FIRST, so the health check cannot re-park on the object you are about to delete
+kubectl --context $CTX -n flux-system patch kustomization <name> --type=merge -p '{"spec":{"suspend":true}}'
+# 2. delete the misplaced HelmRelease -- check for a release first; if it never installed there is
+#    nothing to uninstall (no helm.sh/release.v1 secret in that namespace)
+kubectl --context $CTX -n ack-system delete helmrelease <name>
+# 3. resume, then restart the controller to abandon any goroutine already parked
+kubectl --context $CTX -n flux-system patch kustomization <name> --type=merge -p '{"spec":{"suspend":false}}'
+kubectl --context $CTX -n flux-system rollout restart deploy/kustomize-controller
+```
+
+Deleting before suspending is what makes this expensive: the reconcile parks on an object that no
+longer exists and the stale inventory entry keeps naming the old namespace. After the restart the
+child re-applies under its corrected spec, the HelmRelease appears in `flux-system`, and the health
+check passes in milliseconds. The cascade then clears in a few minutes.
+
+Restarting `kustomize-controller` is low risk here: it is stateless, `prune` is off everywhere so
+nothing can be collected, and a pause in reconciliation changes nothing already running.
+
 **Gate:** all unsuspended Kustomizations `Ready=True`, and the Prow Deployment uids from Stage 0
 unchanged.
 
@@ -445,6 +496,27 @@ kubectl --context $CTX -n prow get deploy -o json | \
   python3 -c 'import json,sys; print(sorted((d["metadata"]["name"],d["metadata"]["uid"]) for d in json.load(sys.stdin)["items"]))'
 # compare against /tmp/baseline-prow-deploy.json
 ```
+
+**The stronger check is that no ACK CR was recreated**, since this stage hands their ownership from
+kustomize-controller to helm-controller and a recreate would mean ACK deleting and rebuilding an AWS
+resource. Deployment uids only cover Prow. There is no uid baseline for the CRs, but a recreate leaves
+a fresh `creationTimestamp`, which is sufficient:
+
+```bash
+kubectl --context $CTX get -A accessentries,addons,podidentityassociations,repositories,\
+roles.iam.services.k8s.aws,buckets,hostedzones,pullthroughcacherules,clusters.eks.services.k8s.aws \
+  -o json | python3 -c '
+import json,sys,datetime
+now=datetime.datetime.now(datetime.timezone.utc)
+for o in json.load(sys.stdin)["items"]:
+    t=datetime.datetime.fromisoformat(o["metadata"]["creationTimestamp"].replace("Z","+00:00"))
+    if (now-t).total_seconds()<7200: print("RECREATED",o["kind"],o["metadata"]["name"])'
+# must print nothing
+```
+
+Prod passed both: 10/10 uids held and 0 of 53 ACK CRs recreated. Also confirm the HelmRelease count
+rose by the number of new charts — 4 to 17 on prod, all Ready — and that none sits outside
+`flux-system`.
 
 ### Stage 3 — Argo CD standup and authorisation
 
