@@ -261,7 +261,38 @@ Nothing below is blocked on analysis; each item is work.
 | dev and prod | this is staging only. The same branch drives all three, so each needs its own `terraform apply` and its own cutover, and prod deserves more care than the eight syncs took here |
 | the `secrets` grant's exit condition | narrow the CSI driver's ClusterRole to namespaced Roles, then delete the cluster-wide secrets rule outright. Written up beside the rule |
 | a fresh bootstrap has one ordering race left | `ack-system` and `flux-system` are created by `null_resource.{ack,flux}_system_namespace` running `bootstrap-namespaces.sh`, so they do exist - but nothing orders those provisioners against `kubernetes_manifest.argocd_root`, so wave 0 can sync before `ack-system` exists and fail on a missing namespace. Argo CD retries, so it self-corrects and only looks broken. A `depends_on` from the root Application to both provisioners removes it. The `prow`/`test-pods` half of this is fixed: they are now `prow/namespaces` at wave 0 |
+| **adopt the hub cluster back into ACK** | deliberately deferred, not abandoned — see below |
 | `periodics_enabled` | declared in no variable and plumbed nowhere; `jobs_config.yaml` commits `true` for every environment. Found while converting `prow-jobs`, unrelated to the migration |
+
+### The hub cluster is Terraform-owned for now, and that is a decision to revisit
+
+The chart conversion drops the hub's own `Cluster` CR. The commit doing it gives the reason: it
+carried *"the last render-time cluster read, which Argo CD could not have satisfied: it renders
+off-cluster, so Helm's `lookup` returns empty."* No later stage re-adopts it — in the end state only
+`ack-build-infra` declares a `Cluster`, and that one is the **build** cluster's.
+
+**The intent is to adopt the hub cluster back into ACK once the migration has settled.** Leaving it
+to Terraform is a scope decision, not the target design: the migration already changes the reconciler
+for every other path, and making the cluster that hosts all of it simultaneously change owner would
+have put the one object whose loss is unrecoverable on the critical path. Terraform owns it through
+`aws_eks_cluster.this` in the meantime, which is where it was already declared.
+
+Three things make coming back to this cheap, and they are worth not undoing:
+
+- the live CR keeps `services.k8s.aws/adoption-policy: adopt-or-create`, so ACK adopts the existing
+  cluster rather than trying to build one
+- it keeps `services.k8s.aws/deletion-policy: retain`, so even deleting the CR leaves the cluster
+- prune is off, so the CR is still there to adopt rather than needing to be recreated from scratch
+
+What the work actually is: replace the render-time read with values passed in explicitly. Terraform
+already threads 14 parameters into Applications via `helm.parameters`, so the mechanism exists — the
+open question is which fields of the live cluster the CR must reproduce without drifting, since a
+`Cluster` spec that omits a field ACK considers managed is how you get a controller fighting the
+console. Answer that against a real cluster before writing the chart, not from the CRD schema.
+
+Until then, treat the hub `Cluster` CR as an orphan that is safe by construction, and do not "tidy"
+it away — deleting it is harmless to the cluster but throws away the adoption annotations that make
+this reversible.
 
 ## How each path was converted
 

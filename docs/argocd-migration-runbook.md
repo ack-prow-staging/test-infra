@@ -424,7 +424,14 @@ kubectl --context $CTX -n ack-system get clusters.eks.services.k8s.aws \
 # the hub's own CR should read retain -- it becomes an orphan from here on
 ```
 
-It is an eighth object with no owner, on top of the seven in `docs/argocd-migration.md`. Verifying
+It is an eighth object with no owner, on top of the seven in `docs/argocd-migration.md`. **This is
+temporary by intent** — the plan is to adopt the hub cluster back into ACK once the migration has
+settled, and Terraform owns it in the meantime to keep the one irreplaceable object off the critical
+path. `docs/argocd-migration.md` has what that work involves. Do not delete the orphaned CR to tidy
+up: it is harmless to the cluster, but it carries the `adopt-or-create` and `retain` annotations that
+make re-adoption cheap.
+
+Verifying
 "inert" per path is still worth doing, but expect this one difference and do not treat it as a
 regression: comparing `kustomize build` at the previous revision against `helm template` of the new
 chart shows every path identical except this CR, plus `external-dns-role` moving out of the `addons`
