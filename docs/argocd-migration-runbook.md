@@ -43,20 +43,51 @@ internalising:
 Rebase each PR on the target's `main` before merging. The sequence currently rebases cleanly, but
 upstream moves independently and the stages land over days.
 
+#### Cherry-picking a stage is not a prefix of the branch
+
+**Stage order and commit order are different orders**, so a stage's PR is a cherry-pick, not a range.
+In the staging branch the cutover sits *before* the root Application, Stage 6 sits before Stage 5, and
+Stage 1's last prune commit sits after all of them — because that history was ordered to make each
+commit individually valid, not to make stages contiguous. Assembling the stages in stage order
+produces conflicts, and they are worth knowing in advance because most are trivial and two are not:
+
+| picking | conflicts with | resolution |
+|---|---|---|
+| `Convert the remaining paths…` | the added prune commit | comment-only; both set `prune: false`. Take the incoming comment, which is the more specific one |
+| `Move the build-cluster connection chart…` | the earlier flux-system comment | comment-only; take incoming. Confirm `targetNamespace: ack-system` survived |
+| `Cut every path over to Argo CD` | `flux/kustomization.yaml` | **mutual.** Staging removed `prometheus.yaml` before this commit; in stage order it is still present. Keep `prometheus.yaml` here and remove it at Stage 6 |
+| `Remove kube-prometheus-stack…` | `flux/kustomization.yaml` | the mirror of the above: remove `prometheus.yaml`, keep `argocd.yaml` removed |
+| `Remove Flux` | `flux/kustomization.yaml` | modify/delete — the commit deletes the file. Accept the deletion |
+
+**The `docs(...)` commits are the trap.** Three of them conflict, and resolving those by taking the
+incoming side silently reverts later corrections, because the docs were written before the code they
+describe was finished. Doing that reintroduced two contradictions: a comment claiming the connection
+chart's objects live in `flux-system` directly above `targetNamespace: ack-system`, and a passage
+citing `charts/flux2-2.18.4` and `scripts/pull-flux-chart.sh` as the house pattern after Stage 8
+deletes both. **Take the final state for docs, not the incoming commit** — or merge them last as one
+squashed commit, which avoids the question.
+
+The check that catches all of this: the assembled sequence's final tree must equal the source
+branch's tree, allowing only for commits the target gained independently.
+
+```bash
+git diff --stat <source-branch> HEAD     # expect only upstream's own newer files
+```
+
 ### Merge order at a glance
 
 Oldest first. The gate column is the short form; the stage section is authoritative.
 
 | stage | merge | gate before proceeding |
 |---|---|---|
-| 0 | nothing | baseline captured (uids, counts, access policies) |
-| 1 | `fix(ack): Set enableNetworkAddressUsageMetrics…`, the two prune commits | `prune: false` observed on every path's **live** spec |
-| 2 | `refactor(flux): Render the ACK and Prow paths from Helm charts`, … | unsuspended Kustomizations `Ready=True`, Prow uids unchanged |
-| 3 | `feat(argocd): Stand up the capability and authorise it without cluster-admin`, … | capability Healthy, RBAC applied, no cluster-admin granted |
+| 0 | nothing | environment pointed at the target account; baseline captured |
+| 1 | `fix(ack): Set enableNetworkAddressUsageMetrics…`, both prune commits, **plus a fourth you write** | `prune: false` on every path's **live** spec except the prometheus pair |
+| 2 | `refactor(flux): Render the ACK and Prow paths from Helm charts`, `feat(argocd): Convert the remaining paths and register the build cluster` | unsuspended Kustomizations `Ready=True`, Prow uids unchanged |
+| 3 | `feat(argocd): Stand up the capability…`, `feat(argocd): Grant the capability the in-cluster RBAC it needs`, `fix(ack): Seed BootstrapPermissions…`, `fix(prow): Gate the one-shot image bootstrap…` | capability Healthy, RBAC applied, no cluster-admin granted |
 | 4 | `feat(argocd): Render the Applications from git via a root Application`, `feat(argocd): Give the Prow namespaces and ServiceAccounts an owner` | every Application Synced+Healthy **while Flux still owns the objects** |
 | 5 | `feat(argocd): Cut every path over to Argo CD` | Stage 4's gate passed for *every* path; presubmit runs end to end |
 | 6 | `chore: Remove kube-prometheus-stack and the Prow Grafana dashboards` | independent; merge whenever |
-| 7 | `feat(argocd): Remove Flux`, `chore(bootstrap): Remove Terraform's Flux footprint` | `terraform plan` clean, no Flux in state, CRDs/RBAC/namespace gone |
+| 7 | `refactor(prow): Move the build-cluster connection chart out of flux-system`, `feat(argocd): Remove Flux`, `chore(bootstrap): Remove Terraform's Flux footprint`, `refactor(argocd): Drop flux-system from the hub write grant` — **in that order** | `terraform plan` clean, no Flux in state, CRDs/RBAC/namespace gone |
 | 8 | `chore: Sweep the remaining Flux references`, `chore(bootstrap): Remove the nodepool swap` | `terraform plan` clean, `general-purpose` NodePool Ready |
 
 **The `docs(...)` commits are inert** — `docs/argocd-migration.md` and this runbook, plus the
@@ -274,8 +305,23 @@ Merge: `fix(ack): Set enableNetworkAddressUsageMetrics on the build VPC`,
 `chore(flux): Disable prune and make deletion structurally impossible`,
 `chore(flux): Disable prune on the last three paths before Flux removal`.
 
-> The last one exists separately only because staging discovered the remainder late. For a fresh
-> environment merge it with the other prune commit — they are one concern.
+> These two exist separately only because staging discovered the remainder late. For a fresh
+> environment merge both prune commits together — they are one concern.
+
+**Then write a fourth commit, because those three are not sufficient.** There is nothing to
+cherry-pick for it: `prow-agent-workflows`, `prow-crds`, `prow-plugins` and `secrets` had prune
+disabled by commits belonging to Stages 2, 5 and 6, every one of which sits *earlier* in the linear
+order than "Disable prune on the last three paths". Deliver Stage 1 on its own and those four stay
+`prune: true` — the precise condition this stage exists to prevent, since deleting a Kustomization
+with prune enabled garbage-collects its inventory.
+
+They live in `flux/prow.yaml` (`prow-crds`), `flux/secrets.yaml`, and
+`flux/prow/charts/prow-agent-workflows.yaml` and `prow-plugins.yaml`. Setting `prune: false` on those
+four is the whole change. Expect the later `Convert the remaining paths…` pick to conflict on the
+comments, which is harmless — see *Cherry-picking a stage is not a prefix of the branch*.
+
+Verify with the gate below rather than by reading the diff: the four are easy to miss precisely
+because three separate commits appear to have covered them.
 
 Then force a reconcile rather than waiting for the interval:
 
@@ -317,8 +363,12 @@ with `DependencyNotReady` and converge in waves. That is `dependsOn` polling, no
 ### Stage 2 — Chart conversions (inert)
 
 Merge: `refactor(flux): Render the ACK and Prow paths from Helm charts`,
-`feat(argocd): Convert the remaining paths and register the build cluster`,
-`refactor(prow): Move the build-cluster connection chart out of flux-system`.
+`feat(argocd): Convert the remaining paths and register the build cluster`.
+
+> **`refactor(prow): Move the build-cluster connection chart out of flux-system` cannot go here**,
+> though it is a chart conversion in spirit. It edits `argocd/applications/values.yaml`, which does
+> not exist until Stage 4 creates it, so applied at this stage it does not merely misbehave — it
+> fails to apply at all. It moves to Stage 7, ahead of the `flux-system` deletion.
 
 These are inert by construction: Flux keeps reconciling and keeps passing the same values, and the
 charts render byte-identically to what the Kustomizations produced. Nothing in this stage requires
@@ -338,8 +388,17 @@ kubectl --context $CTX -n prow get deploy -o json | \
 Merge: `feat(argocd): Stand up the capability and authorise it without cluster-admin`,
 `feat(argocd): Grant the capability the in-cluster RBAC it needs`,
 `fix(ack): Seed BootstrapPermissions only on a fresh bootstrap`,
-`fix(prow): Gate the one-shot image bootstrap behind a variable`,
-`refactor(argocd): Drop flux-system from the hub write grant`.
+`fix(prow): Gate the one-shot image bootstrap behind a variable`.
+
+> **`refactor(argocd): Drop flux-system from the hub write grant` cannot go here either.** Its only
+> functional change is removing `"flux-system"` from `argocd_hub_namespaces`, and the connection
+> chart still renders into that namespace until the move above happens. Drop the grant first and
+> that chart loses its authorisation to sync. It must follow the move, so both land in Stage 7.
+
+The two `fix(...)` commits belong here rather than later: they gate `bootstrap_prow_images` and
+`seed_ack_bootstrap_policy` behind variables defaulting false, and this stage is the first apply.
+Landing them afterwards leaves a window in which an apply can fire the image-build provisioner —
+roughly an hour — or recreate a bootstrap policy ACK has deliberately superseded.
 
 **The Argo CD CRDs must exist before Terraform can plan.** `kubernetes_manifest` validates against
 the live API at plan time, so on a fresh account the capability comes first:
@@ -457,7 +516,15 @@ not remove, which must be deleted by hand** (see Manual steps).
 Irreversible. Deleting the suspended HelmReleases and Kustomizations removes the reversal
 switches, so after this, going back to Flux means re-deriving them from git history.
 
-Merge: `feat(argocd): Remove Flux`, `chore(bootstrap): Remove Terraform's Flux footprint`.
+Merge, **in this order**: `refactor(prow): Move the build-cluster connection chart out of flux-system`,
+`feat(argocd): Remove Flux`, `chore(bootstrap): Remove Terraform's Flux footprint`,
+`refactor(argocd): Drop flux-system from the hub write grant`.
+
+The first and last are here rather than in Stages 2 and 3 for reasons given there, and the order
+among them is a dependency chain, not a preference: the chart has to leave `flux-system` before the
+namespace is deleted, and the grant for `flux-system` cannot be withdrawn until nothing renders into
+it. Let the move sync and confirm the connection chart is Healthy in `ack-system` before merging the
+removal.
 
 **Order matters more here than anywhere else, and one ordering is not obvious — see 7.5.**
 
@@ -690,7 +757,7 @@ cutover reversible and also what leaves debris.
 | 6 | the `prometheus` namespace | helm-controller does not delete a namespace it created |
 | 6 | 10 `monitoring.coreos.com` CRDs | Helm never deletes CRDs installed from a chart's `crds/` directory |
 | 6 | `prometheus-prometheus-kube-admission` Secret | written by a chart *hook*, so it was never part of the release |
-| 2 | the six objects the connection chart left in its old namespace | moving a namespace is a recreate, not an adoption |
+| 7 | the six objects the connection chart left in its old namespace | moving a namespace is a recreate, not an adoption. Moot if `flux-system` is deleted in the same stage, which it now is — but check, because the deletion is what collects them |
 | 7 | Flux's ACK CRs — cache rule, pod identity, access entry, IAM role | declared in charts Argo CD reconciles; **push the git removal first or `automated` recreates them** |
 | 7 | the retained AWS access entry | its CR carried `deletion-policy: retain`, so ACK leaves the AWS object |
 | 7 | the orphaned `ack-flux` Application | Argo CD has no `delete` on Applications, so a removed entry lingers |
@@ -763,9 +830,15 @@ reversal switches.
 - the ACK parent chart repo — in prod, `public.ecr.aws/aws-controllers-k8s/ack-chart`
 - the `ArtifactReader` role — in prod it lives in the shared publishing account
 
-`local.controller_ecr_alias` derives from the first controller repo URI in non-prod. Confirm how it
-resolves for prod before Stage 3, because `controllerEcrRegistry` is threaded into `prow-config`
-and `prow-jobs` as a chart value.
+`local.controller_ecr_alias` derives from the first controller repo URI in non-prod. **Resolved: for
+prod it does not derive at all** — `images.tf` returns the literal `aws-controllers-k8s` whenever
+`stage == "prod"`, so it carries no dependency on the non-prod ECR repos that the same file gates
+off. Confirmed against prod's own `self-managed-vars`, where `CONTROLLER_ECR_REGISTRY` already reads
+`public.ecr.aws/aws-controllers-k8s`. Nothing to check before Stage 3.
+
+The neighbouring value is worth a glance for the same reason: `ecrPublicReaderRoleArn` is built as a
+string from `var.publish_account_id` rather than from the `ArtifactReader` resource, so it too
+survives that resource being absent in prod.
 
 Prod is a different org and package from staging, so `test_infra_org` / `test_infra_repo` differ and
 the fork that the reconcilers read is not the one staging used.
