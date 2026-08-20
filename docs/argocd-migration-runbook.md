@@ -59,13 +59,25 @@ produces conflicts, and they are worth knowing in advance because most are trivi
 | `Remove kube-prometheus-stack…` | `flux/kustomization.yaml` | the mirror of the above: remove `prometheus.yaml`, keep `argocd.yaml` removed |
 | `Remove Flux` | `flux/kustomization.yaml` | modify/delete — the commit deletes the file. Accept the deletion |
 
-**The `docs(...)` commits are the trap.** Three of them conflict, and resolving those by taking the
-incoming side silently reverts later corrections, because the docs were written before the code they
-describe was finished. Doing that reintroduced two contradictions: a comment claiming the connection
-chart's objects live in `flux-system` directly above `targetNamespace: ack-system`, and a passage
-citing `charts/flux2-2.18.4` and `scripts/pull-flux-chart.sh` as the house pattern after Stage 8
-deletes both. **Take the final state for docs, not the incoming commit** — or merge them last as one
-squashed commit, which avoids the question.
+**Docs conflicts are not worth resolving — drop the file.** Since `docs/` never goes upstream, a
+cherry-pick that conflicts on `docs/argocd-migration.md` should be resolved by removing the file from
+the commit:
+
+```bash
+git rm -q --cached docs/argocd-migration.md && rm -f docs/argocd-migration.md
+git add -A && git -c core.editor=true cherry-pick --continue
+```
+
+Note that `git checkout upstream/main -- docs/` does **not** work for this: the file does not exist
+upstream, so there is nothing to restore and it silently leaves the file in place.
+
+Resolving such a conflict properly is worse than useless here, and the reason is worth recording in
+case the decision is ever revisited. Taking the incoming side reverts later corrections, because the
+docs were written before the code they describe was finished — doing that reintroduced two
+contradictions: a comment claiming the connection chart's objects live in `flux-system` directly above
+`targetNamespace: ack-system`, and a passage citing `charts/flux2-2.18.4` and
+`scripts/pull-flux-chart.sh` as the house pattern after Stage 8 deletes both. If docs ever do go
+upstream, take the final state, not the incoming commit.
 
 The check that catches all of this: the assembled sequence's final tree must equal the source
 branch's tree, allowing only for commits the target gained independently.
@@ -90,9 +102,19 @@ Oldest first. The gate column is the short form; the stage section is authoritat
 | 7 | `refactor(prow): Move the build-cluster connection chart out of flux-system`, `feat(argocd): Remove Flux`, `chore(bootstrap): Remove Terraform's Flux footprint`, `refactor(argocd): Drop flux-system from the hub write grant` — **in that order** | `terraform plan` clean, no Flux in state, CRDs/RBAC/namespace gone |
 | 8 | `chore: Sweep the remaining Flux references`, `chore(bootstrap): Remove the nodepool swap` | `terraform plan` clean, `general-purpose` NodePool Ready |
 
-**The `docs(...)` commits are inert** — `docs/argocd-migration.md` and this runbook, plus the
-comment-only corrections that ride with them. They touch nothing any reconciler reads and can be
-merged at any point, or all at the end. They are omitted from the table for that reason.
+**The `docs(...)` commits are not merged upstream at all.** `docs/argocd-migration.md` and this
+runbook are staging artifacts — the record of how the migration was derived and what it cost, which
+is worth having while replaying it and is not something the target repo has asked to carry. They stay
+on the staging fork. Whether any of it is worth preserving upstream is a separate decision, taken
+after the migration lands rather than smuggled in alongside it.
+
+Practically: **drop `docs/` from every stage PR.** Cherry-picking a stage will sometimes pull a doc
+change along with the code — resolve that by removing the file from the commit, not by resolving the
+conflict. Verify before pushing:
+
+```bash
+git diff --name-only upstream/main HEAD -- docs/    # must be empty
+```
 
 ---
 
