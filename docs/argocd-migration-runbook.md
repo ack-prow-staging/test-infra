@@ -93,9 +93,64 @@ Neither is needed when migrating an environment that is already running Prow und
 
 Each stage lists what to merge, what to run, and a **gate** that must pass before the next.
 
-### Stage 0 — Baseline the environment
+### Stage 0 — Point the workspace at the environment, then baseline it
 
-Nothing to merge. Capture what "unchanged" means so you can prove it later.
+Nothing to merge.
+
+#### 0a — Generate the environment's Terraform inputs
+
+**Neither `bootstrap/backend.tf` nor `bootstrap/environment/<stage>.tfvars` is in git** — both are
+gitignored and generated per environment. A checkout carries no trace of which account it last
+pointed at, so a workspace that was just used for staging still has staging's backend on disk.
+Getting this wrong points a prod apply at another account's state.
+
+Confirm the credentials first, because everything below silently follows them:
+
+```bash
+aws sts get-caller-identity --query '{acct:Account,arn:Arn}' --output text
+# must be the target account before continuing
+```
+
+**The tfvars come from SSM**, not from a file anyone edits:
+
+```bash
+cd bootstrap && ./scripts/bootstrap-env.sh     # writes environment/<stage>.tfvars
+```
+
+It reads `/ack/test-infra/bootstrap/env` and prompts for nothing when the parameter already exists.
+The `stage` key in that JSON decides the filename, so it writes `prod.tfvars` on its own. Verify
+`account_id` and `stage` in the output match the account you just confirmed.
+
+**The backend needs care.** `scripts/bootstrap-backend.sh` finds the bucket by the prefix
+`ack-test-infra-terraform-state` and templates `backend.tf` from it, which is the part you want —
+each account has its own bucket and the names carry a random suffix, so the value cannot be
+guessed or copied between environments.
+
+> **It also rewrites the bucket's versioning, encryption and public-access-block on every run, and
+> its encryption payload is not necessarily what the bucket already has.** Prod's state bucket
+> additionally blocks `SSE-C` via `BlockedEncryptionTypes`, which the script's payload omits — so
+> running it there silently drops that restriction. On an environment whose bucket already exists
+> and is already hardened, read the bucket name and write `backend.tf` by hand instead:
+
+```bash
+aws s3api list-buckets \
+  --query "Buckets[?starts_with(Name,'ack-test-infra-terraform-state')].Name" --output text
+# then write bootstrap/backend.tf with that bucket, key bootstrap/terraform.tfstate,
+# the region, use_lockfile = true, encrypt = true
+terraform init -reconfigure -input=false
+```
+
+Reserve the script for a genuinely fresh account, where it has a bucket to create.
+
+> **A wart to expect, not to fix yet.** The SSM JSON is emitted key-for-key, so the generated
+> tfvars includes `flux_version`. Stage 7 deletes that variable, after which every plan prints
+> `Warning: Value for undeclared variable`. It is a warning and the plan still exits 0 — verified on
+> Terraform 1.15.2 — so it breaks nothing. Drop `flux_version` from the SSM parameter once Stage 7
+> is done.
+
+#### 0b — Baseline the cluster
+
+Capture what "unchanged" means so you can prove it later.
 
 ```bash
 CTX=<hub-context>
@@ -108,8 +163,45 @@ kubectl --context $CTX get helmreleases.helm.toolkit.fluxcd.io -A -o json \
 kubectl --context $CTX -n prow get deploy -o json > /tmp/baseline-prow-deploy.json
 ```
 
-**Gate:** you can answer "how many Kustomizations, how many HelmReleases, which are suspended,
-what are the Prow Deployment uids" without running anything.
+Also capture the Flux source of truth, because it decides what merging does:
+
+```bash
+kubectl --context $CTX -n flux-system get gitrepository -o json \
+  | jq '.items[] | {url: .spec.url, ref: .spec.ref, interval: .spec.interval}'
+```
+
+**And look for a second Flux.** `bootstrap-flux.sh` installs a namespace-scoped instance in
+`bootstrap-flux-system` to deploy the real one, and is supposed to tear it down. Prod's was still
+there 84 days later. It is declared nowhere in git, so no stage removes it.
+
+**Do not probe for it with `get ns`.** In prod the `Namespace` object is gone while its contents
+survive — the signature of a namespace force-deleted by stripping its finalizers, which orphans the
+objects instead of collecting them. `kubectl get ns bootstrap-flux-system` answers `NotFound` there
+while six Deployments, a `GitRepository` and a `Kustomization` are all still queryable inside it. Ask
+for the objects, not the namespace:
+
+```bash
+kubectl --context $CTX get kustomizations.kustomize.toolkit.fluxcd.io,gitrepositories.source.toolkit.fluxcd.io \
+  -A -o custom-columns='NS:.metadata.namespace,KIND:.kind,NAME:.metadata.name' | grep -v '^flux-system'
+kubectl --context $CTX -n bootstrap-flux-system get deploy 2>/dev/null
+```
+
+Confirm it is frozen rather than live before treating it as harmless: compare the Ready condition's
+`lastTransitionTime` against the declared `interval`. Prod's read `2026-05-28` with intervals of 5m
+and 1m, so nothing had reconciled it in 84 days. Had those timestamps been recent it would have been
+a second reconciler applying a stale branch, which is a different problem entirely.
+
+**Gate:** you can answer all of these without running anything —
+
+- how many Kustomizations and HelmReleases, and which are suspended
+- the Prow Deployment uids
+- which repo and ref the hub's `GitRepository` reads, and its interval, so you know how long after
+  a merge the change is live
+- whether a `bootstrap-flux-system` exists, and if so what is left in it
+- that `backend.tf` names the target account's bucket and `terraform init` succeeded against it
+- that `<stage>.tfvars` reports the `account_id` and `stage` you expect
+
+The last two are the ones that cause damage rather than delay if they are wrong.
 
 ### Stage 1 — Safety: prune off, deletion protection
 
@@ -538,7 +630,7 @@ cutover reversible and also what leaves debris.
 | 7 | the retained AWS access entry | its CR carried `deletion-policy: retain`, so ACK leaves the AWS object |
 | 7 | the orphaned `ack-flux` Application | Argo CD has no `delete` on Applications, so a removed entry lingers |
 | 7 | Flux CRDs, cluster RBAC, the `flux-system` namespace | never owned by any Application |
-| 7 | **the `bootstrap-flux-system` namespace and everything in it**, if the environment has one | a second, namespace-scoped Flux that `bootstrap/scripts/bootstrap-flux.sh` installs to deploy the real one and is supposed to tear down. Prod still had it 84 days on: six controllers scaled to `0/1`, plus a `GitRepository` and `Kustomization` still naming a long-dead branch. It is inert, but it is declared nowhere in git, so no stage removes it and it outlives the migration. Staging never had it — check for it rather than assuming |
+| 7 | **the orphaned objects in `bootstrap-flux-system`**, if the environment has any — six Deployments, a `GitRepository`, a `Kustomization` | a second, namespace-scoped Flux that `bootstrap/scripts/bootstrap-flux.sh` installs to deploy the real one and is supposed to tear down. Prod still had it 84 days on, frozen. Declared nowhere in git, so no stage removes it. **Delete the objects, not the namespace: the `Namespace` object is already gone** (force-deleted, orphaning its contents), so `kubectl delete ns` fails and `get ns` wrongly reports nothing to clean. The `Kustomization` carries `prune: false`, so removing it collects nothing. Staging never had this — check rather than assume |
 
 **The recurring shape:** `prune: false` is what makes every cutover reversible, and it is also
 what leaves debris at every step. Nothing on this list is deleted by merging. Budget for a
