@@ -681,6 +681,12 @@ rules in `argocd-rbac.tf`.
 Merge: `feat(argocd): Render the Applications from git via a root Application`,
 `feat(argocd): Give the Prow namespaces and ServiceAccounts an owner`.
 
+**This is the stage where Argo CD starts acting on prod**, not Stage 5. The Applications are rendered
+with `automated: true`, so as soon as the root Application exists they sync and adopt objects Flux is
+still reconciling. That overlap is intended — adoption under `ServerSideApply=true` takes over field
+ownership in place — but it means the merge here is the first one that changes who owns live objects.
+Have the `terraform apply` ready rather than queued behind a review.
+
 **Push the branch before applying.** Argo CD reads git; the root Application resolves nothing until
 the chart is pushed.
 
@@ -731,9 +737,17 @@ that is expected at this point — content matches, ownership metadata does not.
 
 Merge: `feat(argocd): Cut every path over to Argo CD`.
 
-This suspends every converted path's HelmRelease or Kustomization in git and enables `automated`
-sync on the Applications. **It is the point of no return for "both reconcilers idle":** a suspended
-HelmRelease plus a manual-sync Application means nothing reconciles that path.
+This suspends every converted path's HelmRelease or Kustomization in git. **It does not enable
+`automated` sync — that already happened in Stage 4**, where the Applications are rendered with
+`automated: true` from the start. Verified: this stage's commit does not touch the field.
+
+So the transition is the reverse of how it reads. Stage 4 is where Argo CD starts acting, adopting
+objects under `ServerSideApply=true` **while Flux is still reconciling them** — deliberately, since
+adoption takes over field ownership in place rather than recreating. Stage 5 is where Flux stops. The
+window in which both reconcilers are live is Stage 4 to Stage 5, not after this.
+
+**What this stage is the point of no return for is "both reconcilers idle":** suspending a HelmRelease
+whose Application cannot sync leaves that path reconciled by nothing.
 
 Do not merge this until Stage 4's gate passed for *every* path.
 
