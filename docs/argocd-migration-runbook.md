@@ -601,7 +601,48 @@ terraform apply -var-file=environment/<env>.tfvars -target='awscc_eks_capability
 terraform apply -var-file=environment/<env>.tfvars     # the rest
 ```
 
-For prod, run without `-auto-approve` and read the plan.
+For prod, run without `-auto-approve` and read the plan. Two things interrupt this on an environment
+that has already been bootstrapped, and both are one-time.
+
+**The targeted apply is refused until the moved resources are also targeted.** This stage puts
+`count` on three resources that had none, so their state addresses move from `x` to `x[0]`, and
+Terraform will not accept a targeted plan that excludes moved instances:
+
+> `Error: Moved resource instances excluded by targeting`
+
+Add the three it names — the message is precise, so take them from it rather than guessing:
+
+```bash
+terraform apply -var-file=environment/<env>.tfvars \
+  -target='awscc_eks_capability.argocd' \
+  -target='aws_iam_role_policy.ack_capability_bootstrap' \
+  -target='null_resource.bootstrap_prow_images' \
+  -target='null_resource.bootstrap_prow_images_job'
+```
+
+That plan destroys the two `bootstrap_prow_images*` `null_resource`s as they drop to `count = 0`,
+which is inert — neither carries a destroy-time provisioner. Confirm rather than assume.
+
+**The capability's access entry must be imported, not created.** EKS creates an access entry for the
+capability role when the capability is created, so the full apply fails:
+
+> `ResourceInUseException: The specified access entry resource is already in use on this cluster`
+
+`aws_eks_access_entry.argocd_capability_group` exists only to *add a Kubernetes group* to that entry —
+its comment says so — but the resource has no adoption path, so Terraform tries to create it. Import
+it, then re-apply:
+
+```bash
+terraform import -var-file=environment/<env>.tfvars \
+  'aws_eks_access_entry.argocd_capability_group' \
+  '<cluster-name>:arn:aws:iam::<account>:role/<stack>-argocd-capability-role'
+```
+
+The plan afterwards should be an in-place update adding exactly `argocd-cluster-scoped` and nothing
+else. If it wants to change `type` or `user_name`, stop: those are the capability's to set and are
+covered by `ignore_changes`.
+
+Expect the capability itself to take about five minutes to reach `ACTIVE`.
 
 **Gate — the grants must be live before any Application syncs.** A sync attempted first fails on
 escalation prevention with a message naming the *chart's* ClusterRole rather than the missing
@@ -609,12 +650,26 @@ grantor rule, which sends you to the wrong file.
 
 ```bash
 # cluster-scoped resources need --all-namespaces or the SAR carries a namespace and matches nothing
-for r in storageclasses ingressclasses nodepools.karpenter.sh namespaces clusterroles; do
+for r in storageclasses ingressclasses nodepools.karpenter.sh nodeclasses.eks.amazonaws.com clusterroles; do
   echo "$r: $(kubectl --context $CTX auth can-i create $r -A \
     --as=probe --as-group=argocd-cluster-scoped)"
 done
-# namespaces must be create=yes and delete=NO
+# all five must be yes
+```
+
+**`create namespaces` is `no` at this stage, and that is correct.** The rule granting it arrives with
+`Give the Prow namespaces and ServiceAccounts an owner` in Stage 4, alongside the `prow/namespaces`
+Application that needs it — checked on prod, the rule is absent from `argocd-rbac.tf` until then. Do
+not add it here to make a gate pass; it is the same grant whose absence stalls wave 0, covered under
+Stage 4.
+
+Verify it is still refused, and that delete is refused permanently:
+
+```bash
+kubectl --context $CTX auth can-i create namespaces -A --as=probe --as-group=argocd-cluster-scoped
+# no  -- becomes yes after Stage 4
 kubectl --context $CTX auth can-i delete namespaces -A --as=probe --as-group=argocd-cluster-scoped
+# no  -- must stay no, at every stage
 ```
 
 `can-i` reports `no` for anything granted by an EKS **access policy** — those are enforced by the
