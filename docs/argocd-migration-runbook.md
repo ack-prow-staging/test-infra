@@ -218,6 +218,35 @@ CNAME.
 So: reconcile the drift, or accept the deletion deliberately, before the first apply. Do not
 discover it from an apply.
 
+**What prod did, and why it is the cheaper of the two fixes.** The stale value was the wrong one —
+`prow.ack.aws.dev` serves traffic, `prow-v2.ack.aws.dev` did not — and the `prow-v2` zone turned out
+to be debris: a redundant alias to the *same* live ALB, plus an ACM validation CNAME for a
+certificate reporting `InUse=False`. Deleting the zone and that certificate up front makes the
+replacement harmless, because the provisioner opens with
+
+```sh
+if [ -z "$ZONE_ID" ]; then echo "  Hosted zone not found. Nothing to clean up."; exit 0; fi
+```
+
+and carries `on_failure = continue`. So a missing zone is a clean no-op, the resource is recreated
+carrying the correct trigger, and a genuine future `terraform destroy` would then target the right
+zone.
+
+The alternative was `terraform state rm null_resource.cleanup_prow_hosted_zone`, which also works —
+state operations never run provisioners, and this resource has **zero** create-time provisioners, so
+recreating it does nothing. Prefer deleting the stale object when it is genuinely debris, and reserve
+the state surgery for when the object must survive.
+
+Two related pieces of debris surfaced while checking whether the zone was safe to delete, both from
+cluster generations that no longer exist — worth looking for in any long-lived account, since neither
+is referenced by DNS or by any Ingress:
+
+- an ALB tagged `elbv2.k8s.aws/cluster = TestInfraCluster`, created 2023-02-16, all targets unhealthy
+- four target groups tagged for `TestInfraCluster` and `TestInfraCluster15BBC7AB-…`
+
+Confirm the owning cluster is absent from `aws eks list-clusters` first. If it still exists, the AWS
+Load Balancer Controller simply recreates whatever you delete.
+
 There are four of these in `ack.tf`, and it is worth knowing what each would do and what makes it
 fire:
 
