@@ -72,6 +72,27 @@ merged at any point, or all at the end. They are omitted from the table for that
   needs its own. Required values: `region`, `account_id`, `flux_version`, `prow_domain`,
   `test_infra_org`, `test_infra_repo`, `test_infra_branch`, `stage`, `kubernetes_org`,
   `redhat_org`, `controllers`, `publish_account_id`.
+- **`bootstrap/identity/` must be applied first, and it is a separate Terraform stack.** It creates
+  the IAM Identity Center account instance and the `<stack_name>-argocd-admins` group that Stage 3
+  consumes by data source. It keeps its own state (`identity/terraform.tfstate`) precisely so the
+  main stack's destroy/apply cycle can never delete them, which also means it needs **its own
+  generated `backend.tf`** in `bootstrap/identity/` pointing at the same environment bucket.
+
+  Skip it and Stage 3 does not fail late, it fails at plan:
+
+  > `Error: Missing required argument` — `data.aws_identitystore_group.argocd_admins`,
+  > `The argument "identity_store_id" is required, but no definition was found.`
+
+  which is `one(data.aws_ssoadmin_instances.this.identity_store_ids)` yielding `null` because the
+  account has no instance yet. Verified against prod, where `aws sso-admin list-instances` returns
+  nothing. Confirm before Stage 3 rather than reading that error:
+
+  ```bash
+  aws sso-admin list-instances --query 'Instances[].IdentityStoreId' --output text   # must be non-empty
+  aws identitystore list-groups --identity-store-id <id> \
+    --query "Groups[?DisplayName=='<stack_name>-argocd-admins']" --output text
+  ```
+
 - `test_infra_branch` **must name the branch the reconcilers should read**. Do not rely on a
   `-var` override on the command line: staging spent the whole migration with three different
   values live at once — the root Application on one branch, Flux's ConfigMap on another, and
@@ -141,6 +162,50 @@ terraform init -reconfigure -input=false
 ```
 
 Reserve the script for a genuinely fresh account, where it has a bucket to create.
+
+#### 0c — Plan once, and read it for destroy-time provisioners
+
+Run a plan before any stage needs one, and read it for **replacements**, not just for the summary
+line. Terraform's own summary hides the danger: a replaced `null_resource` reports as one add and
+one destroy, and if it carries a `when = destroy` provisioner, that provisioner *runs* — against the
+old trigger values.
+
+```bash
+terraform plan -input=false -no-color -var-file=environment/<stage>.tfvars > /tmp/plan.log 2>&1
+grep -E "must be replaced|will be destroyed" /tmp/plan.log
+grep -rn "when *= *destroy" *.tf          # which of those actually do something on destroy
+```
+
+Prod is a live example, and it has nothing to do with the migration — it is state drift the first
+apply would have executed. `null_resource.cleanup_prow_hosted_zone` triggers on `prow_domain`, and
+prod's state held `prow-v2.ack.aws.dev` while the SSM-derived tfvars says `prow.ack.aws.dev`. That
+one-word difference forces a replacement, and the resource's destroy provisioner looks up a hosted
+zone by name and deletes it. It would have run with the *old* value and deleted the
+`prow-v2.ack.aws.dev` zone — which still exists, with five records including an ACM DNS-validation
+CNAME.
+
+So: reconcile the drift, or accept the deletion deliberately, before the first apply. Do not
+discover it from an apply.
+
+There are four of these in `ack.tf`, and it is worth knowing what each would do and what makes it
+fire:
+
+| resource | trigger | what its destroy provisioner does |
+|---|---|---|
+| `cleanup_prow_hosted_zone` | `prow_domain`, `region` | deletes the Route53 hosted zone, records first |
+| `cleanup_prow_logs_bucket` | `bucket_name` | empties the bucket, all versions, then deletes it |
+| `cleanup_ack_capability_role` | `role_name` | detaches and deletes the IAM role and its policies |
+| `cleanup_ack_resources` | `cluster_name`, `region`, `script` | runs `cleanup-ack-resources.sh` |
+
+The first three trigger on values derived from `stack_name`, `account_id` and `prow_domain`, so they
+are stable unless one of those changes — which is exactly what happened to `prow_domain`. The
+fourth's `script` trigger is a **path string, not file content**, so editing
+`cleanup-ack-resources.sh` does not force a replacement; only moving it would. None of the migration
+commits change any of these triggers.
+
+By contrast the two one-shot `null_resource`s that Stage 3 destroys — `bootstrap_prow_images` and
+`bootstrap_prow_images_job`, both dropping to `count = 0` — carry no destroy-time provisioner, so
+their removal is inert. Confirm that rather than assuming it.
 
 > **A wart to expect, not to fix yet.** The SSM JSON is emitted key-for-key, so the generated
 > tfvars includes `flux_version`. Stage 7 deletes that variable, after which every plan prints
