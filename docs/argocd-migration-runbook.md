@@ -23,6 +23,26 @@ If the target environment tracks a branch rather than `main`, stage by cherry-pi
 advancing the branch stage by stage. If it tracks `main` directly, stage by advancing `main` and
 letting each stage converge before pushing the next.
 
+### How the stages reach a different org
+
+Staging and prod are different repos in different orgs, so the commits do not simply advance —
+**each stage goes in as its own PR against the target repo** (for prod, `aws-controllers-k8s/test-infra`).
+Never push directly to its `main`. One PR per stage keeps the gate between stages, which is the
+whole point of the ordering, and every commit in the sequence has been checked to be individually
+valid so a PR can stop at any stage boundary.
+
+**Merging is deploying.** Prod's `GitRepository` reads `main` at a **1-minute interval**, so a merged
+PR is live in about 60 seconds, with no window to inspect anything first. Two consequences worth
+internalising:
+
+- Verify a stage's gate *before* merging the next PR, not after. There is no soak period unless you
+  make one.
+- Where a stage pairs git changes with Terraform, the git half lands on merge and the Terraform half
+  waits for an apply. Have the apply ready to run rather than queued behind a review.
+
+Rebase each PR on the target's `main` before merging. The sequence currently rebases cleanly, but
+upstream moves independently and the stages land over days.
+
 ### Merge order at a glance
 
 Oldest first. The gate column is the short form; the stage section is authoritative.
@@ -116,9 +136,19 @@ kubectl --context $CTX -n flux-system annotate kustomization flux \
 
 ```bash
 kubectl --context $CTX get kustomizations.kustomize.toolkit.fluxcd.io -A \
-  -o custom-columns='NAME:.metadata.name,PRUNE:.spec.prune' | grep -i true
+  -o custom-columns='NAME:.metadata.name,PRUNE:.spec.prune' \
+  | grep -i true | grep -vE 'prometheus'
 # must return nothing
 ```
+
+**`prometheus` and `prometheus-dashboards` are the exception, and stay `prune: true`.** The rule
+exists because converting a path to a chart makes every raw object stale and prune deletes stale
+objects. Those two are never converted — Stage 6 deletes them outright — so there is no stale
+window for prune to act in, and when the Kustomization goes, prune reclaiming its inventory is the
+outcome you want rather than the hazard. Staging confirmed it: everything the release owned was
+pruned correctly, and only what Helm and Flux structurally never delete was left by hand (see
+*Manual steps*). If Stage 6 has already been merged they will be absent entirely and the plain
+`grep -i true` returns nothing on its own.
 
 This is the most important gate in the runbook. Every later step deletes or suspends something,
 and a Kustomization with prune enabled garbage-collects its inventory when deleted. On staging
@@ -508,6 +538,7 @@ cutover reversible and also what leaves debris.
 | 7 | the retained AWS access entry | its CR carried `deletion-policy: retain`, so ACK leaves the AWS object |
 | 7 | the orphaned `ack-flux` Application | Argo CD has no `delete` on Applications, so a removed entry lingers |
 | 7 | Flux CRDs, cluster RBAC, the `flux-system` namespace | never owned by any Application |
+| 7 | **the `bootstrap-flux-system` namespace and everything in it**, if the environment has one | a second, namespace-scoped Flux that `bootstrap/scripts/bootstrap-flux.sh` installs to deploy the real one and is supposed to tear down. Prod still had it 84 days on: six controllers scaled to `0/1`, plus a `GitRepository` and `Kustomization` still naming a long-dead branch. It is inert, but it is declared nowhere in git, so no stage removes it and it outlives the migration. Staging never had it — check for it rather than assuming |
 
 **The recurring shape:** `prune: false` is what makes every cutover reversible, and it is also
 what leaves debris at every step. Nothing on this list is deleted by merging. Budget for a
