@@ -879,6 +879,52 @@ applying the Application) would all need guarding too, along with the `applicati
 is not optional. That is a chart refactor touching a Job that runs against the cluster on every
 reconcile. It stays `Ready=False` under Flux by design; after this stage Argo CD owns the path.
 
+#### This stage does not suspend everything, and the gap is in the hand-off
+
+**Eleven paths are cut over but never suspended by any stage.** On prod, after this stage merged,
+these still had a live Flux reconciler *and* an automated Application:
+
+```
+ack-addons          ack-capability       ack-flux                 ack-prow
+ack-addons-roles    ack-capability-role  ack-pod-identities       prow-mirror
+ack-build-infra     ack-cluster          ack-pod-identity-roles
+```
+
+They are the suspends deferred out of Stage 2, which kept only `prow-build-cluster-connection` —
+the one path whose chart cannot render under Flux at all. The plan was for this stage to carry the
+other eleven. **It does not:** the eight suspends here are different paths, all under `prow/`. No
+single stage is wrong, which is why reading either stage's diff does not reveal it.
+
+Fixed by suspending the eleven HelmReleases. Suspending the HelmRelease is enough and the
+Kustomization above each stays live on purpose: those directories hold nothing but the HelmRelease,
+so the Kustomization exists to apply it, which is also what makes a declared suspend stick where an
+imperative one would be reverted.
+
+**Gate — enumerate both sides, do not read the diff.** The check below is the one that finds this
+class of problem, and the reason the older gate missed it is that it lists suspend states without
+joining them to the Applications:
+
+```bash
+kubectl --context $CTX get kustomizations.kustomize.toolkit.fluxcd.io -A -o json > /tmp/kz.json
+kubectl --context $CTX get helmreleases.helm.toolkit.fluxcd.io -A -o json > /tmp/hr.json
+kubectl --context $CTX -n argocd get applications.argoproj.io -o json > /tmp/app.json
+python3 - <<'PY'
+import json
+auto={a["metadata"]["name"] for a in json.load(open("/tmp/app.json"))["items"]
+      if (a["spec"].get("syncPolicy") or {}).get("automated") is not None}
+live=set()
+for f in ("/tmp/kz.json","/tmp/hr.json"):
+    for i in json.load(open(f))["items"]:
+        if not i["spec"].get("suspend"): live.add(i["metadata"]["name"])
+both=sorted(live & auto)
+print("BOTH reconcilers live on:", both or "none -- gate passes")
+PY
+```
+
+Anything printed is a path owned by two reconcilers. The expected answer is nothing. The three
+HelmReleases that legitimately stay unsuspended — `flux2`, `prometheus`,
+`prow-build-cluster-kubeconfig` — have no Application, so they never appear here.
+
 **Gate:**
 
 ```bash
