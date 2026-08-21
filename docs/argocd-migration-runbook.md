@@ -698,6 +698,15 @@ rules in `argocd-rbac.tf`.
 Merge: `feat(argocd): Render the Applications from git via a root Application`,
 `feat(argocd): Give the Prow namespaces and ServiceAccounts an owner`.
 
+The second commit differs from its staging-branch original in one comment: the worked
+example explaining why `yamlencode` mangles an account id with a leading zero used a real
+account, and now uses `012345678901`. The point reads the same. No other identifier in this
+stage was touched — `prow/plugins/agent-plugin/{config/workflows.yaml,README.md}` still
+carry a real account in their `image:` values, which is a live image reference and not
+something to swap for a placeholder. Worth fixing by making the registry a substituted
+token, as `prow/agent-workflows/` already does, but that is its own change and not
+migration work.
+
 **This is the stage where Argo CD starts acting on prod**, not Stage 5. The Applications are rendered
 with `automated: true`, so as soon as the root Application exists they sync and adopt objects Flux is
 still reconciling. That overlap is intended — adoption under `ServerSideApply=true` takes over field
