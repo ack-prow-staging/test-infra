@@ -744,6 +744,33 @@ and the whole tree parked behind it, presenting as a stall rather than as the pe
 is. Nothing is damaged — the Namespaces and ServiceAccounts already exist, and this path adopts
 rather than creates them — so the apply clears it.
 
+**`wrong type for value; expected string; got int64` — a 12-digit account id arriving as a
+number.** This is what actually failed on the first prod sync, on `prow-jobs` and `prow-plugins`,
+and it is a defect in this stage's own chart rather than an environment problem. Argo CD renders
+`helm.parameters` as `--set`, and Helm's `--set` parser coerces anything numeric-looking, so
+`accountId` reaches the template as an int64. Any chart that passes it to a string function —
+both of these call `replace` — dies at render time. Quoting the value in
+`argocd/applications/templates/application.yaml` does *not* prevent it: that only makes the
+rendered Application a YAML string, and Argo CD still hands the value to `--set`. The fix is
+`forceString: true` on every parameter, which selects `--set-string`.
+
+What makes this easy to misdiagnose is that it hits **two paths out of the twelve** that take
+`accountId`. The other ten only interpolate it, and an int64 interpolates to the right digits, so
+they render clean and the failure looks path-specific rather than systemic. Reproduce it outside
+the cluster before touching anything:
+
+```bash
+# fails with the int64 error; --set-string renders clean
+helm template prow/jobs --name-template prow-jobs --set accountId=<12-digit id> \
+  --set region=us-west-2 --set testInfraOrg=<org> --set testInfraRepo=test-infra \
+  --set testInfraBranch=main --set controllerEcrRegistry=<registry> \
+  --set prowImagesRepoUri=<uri> --include-crds
+```
+
+Fixed in git only — no `terraform apply`, because the root Application and the values blob are
+untouched. With `automated: true` already in effect the root re-renders on merge; annotate it with
+`argocd.argoproj.io/refresh=normal` rather than waiting for the poll interval.
+
 **Gate — every Application Synced and Healthy, and every adopted object's uid held.** Adoption
 happens under `ServerSideApply=true`: the Applications describe objects Flux already applied, so
 Argo CD takes over field ownership in place rather than recreating. Check the ones where a recreate
@@ -758,6 +785,29 @@ kubectl --context $CTX -n argocd get applications.argoproj.io \
 
 If an Application reports `OutOfSync` on nothing but Flux's `kustomize.toolkit.fluxcd.io/*` labels,
 that is expected at this point — content matches, ownership metadata does not.
+
+**Do not read Flux immediately after a merge. It looks broken and is not.** On prod, seconds after
+the Stage 4 fix landed, 15 of 25 Kustomizations reported `Ready=False`, every one of them
+`DependencyNotReady` cascading from `flux-system/ack-capability` — while `ack-capability` itself was
+`Ready=True` at the new revision. That combination is Flux re-walking its `dependsOn` graph as a new
+revision propagates: dependents evaluate readiness before the dependency's new reconciliation is
+observed, and report the dependency as not ready. It drains on its own, monotonically, in about two
+minutes: 15 → 7 → 4 → 2 → 1 → 0.
+
+**This recurs on every merge for the rest of the migration**, and it is worth knowing precisely
+because the cutover stages are where a genuine Flux failure would show up the same way. Two things
+distinguish the transient from a real problem: the reason is `DependencyNotReady` and nothing else,
+and the named dependency is itself `Ready=True`. A real failure names a reason of its own —
+`BuildFailed`, `HealthCheckFailed`, a field-ownership conflict. Watch it drain rather than reading it
+once:
+
+```bash
+for i in $(seq 1 15); do
+  kubectl --context $CTX -n flux-system get kustomizations --no-headers \
+    | awk '{print $3}' | sort | uniq -c | tr '\n' ' '; echo
+  sleep 12
+done
+```
 
 ### Stage 5 — Cutover
 
