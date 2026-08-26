@@ -8,10 +8,9 @@
             GITHUB_ORG: ${TEST_INFRA_ORG}
             GITHUB_EMAIL_PREFIX: "82905295"
             GITHUB_ACTOR: ack-bot
-            JOBS_CONFIG_PATH: "/prow/jobs/jobs_config.yaml"
         environmentFromSecrets:
             GITHUB_TOKEN:
-                name: prowjob-github-pat-token
+                name: agent-github-pat-token
                 key: token
         timeout: "45m"
         resources:

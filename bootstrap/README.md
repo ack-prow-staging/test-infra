@@ -39,10 +39,12 @@ aws secretsmanager create-secret \
   --name "ack/prow/github-pat-token" \
   --secret-string "<PAT_TOKEN>"
 
-# API Model Knowledge Base ID (used by the add-resource workflow agent)
+# Dedicated GitHub Personal Access Token for the agent workflow. Kept separate from
+# the shared github-pat-token above: the agent runs on the build cluster and its
+# workflow-runner IAM role can read ONLY this secret.
 aws secretsmanager create-secret \
-  --name "ack/prow/api-model-kb" \
-  --secret-string "<KNOWLEDGE_BASE_ID>"
+  --name "ack/prow/agent-github-pat-token" \
+  --secret-string "<AGENT_PAT_TOKEN>"
 
 ```
 

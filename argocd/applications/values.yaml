@@ -409,7 +409,7 @@ applications:
     # agent-plugin. Read the block in that file before touching this.
     #
     # Wave 5 on the same two omitted edges as prow-jobs: the prow namespace, and the
-    # mirrored image its Deployment pulls (…-prow-images:agent-plugin-0.0.7).
+    # mirrored image its Deployment pulls (…-prow-images:agent-plugin-0.0.8).
     path: prow/plugins/deployments
     targetNamespace: prow
     wave: 5

@@ -157,7 +157,10 @@ func (g *DefaultGenerator) CreateWorkflowProwJob(
 		Spec: k8s.ProwJobSpec{
 			Type:    k8s.PeriodicJob,
 			Agent:   k8s.KubernetesAgent,
-			Cluster: "default",
+			// Run on the dedicated build cluster for workload isolation from the
+			// Prow control plane. "build" is the kubeconfig context alias Prow
+			// registers for the build cluster (see jobs_config.yaml presubmit_cluster).
+			Cluster: "build",
 			Job:     fmt.Sprintf("agent-workflow-%s", workflowName),
 			// Add decoration config for S3 logs
 			DecorationConfig: &k8s.DecorationConfig{
@@ -191,21 +194,27 @@ func (g *DefaultGenerator) CreateWorkflowProwJob(
 						Requests: v1.ResourceList{},
 						Limits:   v1.ResourceList{},
 					},
+					// Mount the SecretProviderClass so the Secrets Store CSI driver
+					// syncs the dedicated agent GitHub PAT (agent-github-pat-token)
+					// into a Kubernetes Secret using this pod's workflow-runner Pod
+					// Identity. GITHUB_TOKEN then reads that Secret via secretKeyRef.
 					VolumeMounts: []v1.VolumeMount{
 						{
-							Name:      "jobs-config",
-							MountPath: "/prow/jobs",
+							Name:      "agent-secrets",
+							MountPath: "/mnt/secrets-store",
 							ReadOnly:  true,
 						},
 					},
 				}},
 				Volumes: []v1.Volume{
 					{
-						Name: "jobs-config",
+						Name: "agent-secrets",
 						VolumeSource: v1.VolumeSource{
-							ConfigMap: &v1.ConfigMapVolumeSource{
-								LocalObjectReference: v1.LocalObjectReference{
-									Name: "jobs-config",
+							CSI: &v1.CSIVolumeSource{
+								Driver:   "secrets-store.csi.k8s.io",
+								ReadOnly: Bool(true),
+								VolumeAttributes: map[string]string{
+									"secretProviderClass": "agent-secrets",
 								},
 							},
 						},

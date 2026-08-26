@@ -361,6 +361,90 @@ spec:
         ]
       }
 ---
+# Build Cluster Workflow Runner Role - used by agent workflow job pods running on the
+# dedicated build cluster (cluster: build) to mount the SecretProviderClass via the
+# Secrets Store CSI driver. Deliberately isolated from the control-plane
+# prow-workflow-runner-role: it can read ONLY the agent-specific GitHub PAT secret
+# (ack/prow/agent-github-pat-token), never the shared prowjob token or any other
+# ack/prow secret. Bound to the build cluster's test-pods/workflow-runner SA by the
+# ack-build-infra pod-identities chart.
+#
+# BedrockInvoke lets the agent invoke the Claude model on Bedrock (default
+# us.anthropic.claude-opus-4-6-v1, a cross-region inference profile — hence both the
+# foundation-model and inference-profile resources). Scoped to the Anthropic family
+# so a --model override still works; tighten to the exact model id if desired.
+# S3Logs is required for the Prow decoration sidecar to upload build/artifact logs to
+# the prow-logs bucket; it is scoped to that one bucket.
+apiVersion: iam.services.k8s.aws/v1alpha1
+kind: Role
+metadata:
+  name: prow-build-workflow-runner-role
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+spec:
+  name: {{ $stackName }}-prow-build-workflow-runner-role
+  assumeRolePolicyDocument: |
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": {
+            "Service": "pods.eks.amazonaws.com"
+          },
+          "Action": ["sts:AssumeRole", "sts:TagSession"]
+        }
+      ]
+    }
+  inlinePolicies:
+    SecretsAccess: |
+      {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
+            "Resource": [
+              "arn:aws:secretsmanager:{{ $region }}:{{ $accountId }}:secret:ack/prow/agent-github-pat-token-*"
+            ]
+          }
+        ]
+      }
+    BedrockInvoke: |
+      {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "bedrock:InvokeModel",
+              "bedrock:InvokeModelWithResponseStream",
+              "bedrock:Converse",
+              "bedrock:ConverseStream"
+            ],
+            "Resource": [
+              "arn:aws:bedrock:*::foundation-model/anthropic.*",
+              "arn:aws:bedrock:*:{{ $accountId }}:inference-profile/*.anthropic.*"
+            ]
+          }
+        ]
+      }
+    S3Logs: |
+      {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": ["s3:Get*", "s3:List*", "s3:Put*", "s3:DeleteObject"],
+            "Resource": [
+              "arn:aws:s3:::{{ $stackName }}-prow-logs-{{ $accountId }}",
+              "arn:aws:s3:::{{ $stackName }}-prow-logs-{{ $accountId }}/*"
+            ]
+          }
+        ]
+      }
+---
 # Mirror Role - used by the prow-mirror Job to copy images into ECR
 apiVersion: iam.services.k8s.aws/v1alpha1
 kind: Role
