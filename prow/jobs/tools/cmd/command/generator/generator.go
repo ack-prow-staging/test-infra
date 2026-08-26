@@ -260,6 +260,12 @@ func GenerateAgentWorkflows(imagesConfigPath, templatePath, outputPath string) e
 	content.WriteString("workflows:\n")
 
 	for _, file := range templateFiles {
+		// Only render workflow templates (*.tpl). Other files in this directory
+		// (e.g. agent-workflow-config.yaml, a Helm chart template using Sprig
+		// functions like "required") are not Go templates and must be skipped.
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".tpl") {
+			continue
+		}
 		fileData, _ := os.ReadFile(fmt.Sprintf("%s/%s", templatePath, file.Name()))
 		tmpl, err := template.New(file.Name()).Funcs(template.FuncMap{"contains": contains}).Parse(string(fileData))
 

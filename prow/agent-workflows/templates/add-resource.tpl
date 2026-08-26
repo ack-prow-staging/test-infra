@@ -13,9 +13,6 @@
             GITHUB_TOKEN:
                 name: prowjob-github-pat-token
                 key: token
-            MODEL_AGENT_KB_ID:
-                name: api-model-kb
-                key: id
         timeout: "45m"
         resources:
             cpu: "2"
