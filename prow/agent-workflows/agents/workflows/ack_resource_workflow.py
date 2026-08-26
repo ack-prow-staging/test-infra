@@ -14,10 +14,8 @@ import os
 import time
 from ack_tag_agent.prompt import ACK_TAG_AGENT_SYSTEM_PROMPT
 from ack_tag_agent.tools import compile_service_controller, read_service_file, write_service_controller_file
-import yaml
-from typing import Optional, List
+from typing import Optional
 from dataclasses import dataclass
-from pathlib import Path
 
 from config.defaults import DEFAULT_MODEL_ID
 from utils.bedrock import create_enhanced_agent
@@ -72,38 +70,6 @@ class ACKResourceWorkflow:
         """Initialize the workflow orchestrator."""
         pass
     
-    def _load_supported_services(self) -> List[str]:
-        """Load the list of supported AWS services from jobs_config.yaml."""
-        try:
-            # Use JOBS_CONFIG_PATH env var if set (e.g. in ProwJob), otherwise
-            # fall back to the relative path from the source tree.
-            env_path = os.environ.get("JOBS_CONFIG_PATH")
-            if env_path:
-                config_path = Path(env_path)
-            else:
-                config_path = Path(__file__).parent.parent.parent.parent / "jobs" / "jobs_config.yaml"
-            
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
-                
-            return config.get('aws_services', [])
-        except Exception as e:
-            print(f"\n\033[93m⚠️  Warning: Could not load supported services list: {e}\033[0m")
-            return []
-    
-    def _validate_service(self, service: str) -> tuple[bool, str]:
-        """Validate that the service is supported in ACK infrastructure."""
-        supported_services = self._load_supported_services()
-        
-        if not supported_services:
-            return False, "Could not load supported services list from jobs_config.yaml"
-        
-        if service.lower() in [s.lower() for s in supported_services]:
-            return True, f"Service '{service}' is supported"
-        else:
-            available_services = ", ".join(sorted(supported_services))
-            return False, f"Service '{service}' is not supported. Available services: {available_services}"
-
     def _create_model_agent(self, model_id: str):
         """Create a fresh Model Agent instance."""
         return create_enhanced_agent(
@@ -333,21 +299,6 @@ Use add_memory to store this information for future reference."""
             print(f"   Model: {input_data.model_id}")
             if input_data.aws_sdk_version:
                 print(f"   AWS SDK: {input_data.aws_sdk_version}")
-            
-            # Step 0: Validate service is supported
-            print(f"\n\033[96m🔍 Validating service '{input_data.service}' is supported...\033[0m")
-            service_valid, validation_message = self._validate_service(input_data.service)
-            
-            if not service_valid:
-                print(f"\n\033[91m❌ Service validation failed\033[0m\n")
-                return ResourceAdditionOutput(
-                    success=False,
-                    service=input_data.service,
-                    resource=input_data.resource,
-                    error_message=f"Service validation failed: {validation_message}",
-                )
-            else:
-                print(f"\n\033[92m✅ {validation_message}\033[0m")
             
             # Step 1: Run Model Agent
             model_success, model_response = await self._run_model_agent(input_data.service, input_data.resource, input_data.model_id)
