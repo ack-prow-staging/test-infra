@@ -1,7 +1,10 @@
     add-resource:
         description: "ACK resource addition workflow"
         image: {{printf "%s:%s" $.ImageContext.ImageRepo (index $.ImageContext.Images "add-resource") }}
-        command: ["./prow-job.sh"]
+        # Absolute path: with extra_refs, Prow's decoration runs the entrypoint
+        # from a clonerefs checkout dir, not the image's /app, so a relative
+        # "./prow-job.sh" would not resolve.
+        command: ["/app/prow-job.sh"]
         required_args: ["service", "resource"]
         optional_args: ["model", "aws-sdk-version"]
         environment:

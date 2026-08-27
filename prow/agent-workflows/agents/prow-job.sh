@@ -55,7 +55,12 @@ fi
 
 DEFAULT_PR_TARGET_BRANCH="main"
 PR_TARGET_BRANCH=${PR_TARGET_BRANCH:-$DEFAULT_PR_TARGET_BRANCH}
-WORKFLOW_DIR=$(pwd)
+# Resolve the workflow package dir from this script's own location, NOT $(pwd):
+# once the job declares extra_refs, Prow's decoration runs the entrypoint from a
+# clonerefs checkout dir (an extra_ref) rather than the image's /app, so `pwd`
+# would point at code-generator and `python -m workflows` would fail / import the
+# wrong packages.
+WORKFLOW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JOB_USER="prow"
 SERVICE_REPO=$SERVICE-controller
 ORG_REPO=$GITHUB_ORG/$SERVICE-controller
