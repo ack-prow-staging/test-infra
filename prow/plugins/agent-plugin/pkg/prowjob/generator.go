@@ -42,14 +42,16 @@ type Generator interface {
 	) (*k8s.ProwJob, error)
 }
 
-// DefaultGenerator is the standard implementation of the Generator interface
+// DefaultGenerator is the standard implementation of the Generator interface.
+// It holds a WorkflowConfigLoader rather than a pre-parsed map so per-request
+// lookups pick up ConfigMap updates without a pod restart.
 type DefaultGenerator struct {
-	workflows map[string]*Workflow
+	loader *WorkflowConfigLoader
 }
 
-// NewGenerator creates a new ProwJob generator
-func NewGenerator(workflows map[string]*Workflow) Generator {
-	return &DefaultGenerator{workflows: workflows}
+// NewGenerator creates a new ProwJob generator backed by the given loader.
+func NewGenerator(loader *WorkflowConfigLoader) Generator {
+	return &DefaultGenerator{loader: loader}
 }
 
 // CreateWorkflowProwJob creates a ProwJob for a workflow execution
@@ -64,9 +66,12 @@ func (g *DefaultGenerator) CreateWorkflowProwJob(
 	s3Bucket string,
 ) (*k8s.ProwJob, error) {
 
-	workflow, exists := g.workflows[workflowName]
-	if !exists {
-		return nil, fmt.Errorf("workflow %s not found", workflowName)
+	// Look up the workflow through the loader on every call — this is what
+	// makes the plugin pick up an updated agent-workflow-config ConfigMap
+	// (e.g. a bumped image tag) without a pod restart.
+	workflow, err := g.loader.GetWorkflowByName(workflowName)
+	if err != nil {
+		return nil, err
 	}
 
 	envVars := []v1.EnvVar{

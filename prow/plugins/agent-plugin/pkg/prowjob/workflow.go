@@ -112,3 +112,41 @@ func (wc *WorkflowConfig) GetWorkflowByName(name string) (*Workflow, error) {
 func (wc *WorkflowConfig) GetWorkflowsMap() map[string]*Workflow {
 	return wc.Workflows
 }
+
+// WorkflowConfigLoader reads and parses the workflow config from disk on every
+// Get(), so the plugin picks up ConfigMap updates without a pod restart:
+// kubelet swaps the mounted file atomically via a symlink, and the next Get()
+// reads the new content.
+//
+// It deliberately does NOT cache a previously-parsed config. Serving a stale
+// config on a read/parse error would hide a broken ConfigMap — the plugin would
+// keep generating jobs from old config while the new one silently failed to
+// load. Instead every error is surfaced so a bad config fails the /agent
+// command loudly. Reads are cheap: /agent commands are infrequent and the file
+// is small.
+type WorkflowConfigLoader struct {
+	path string
+}
+
+// NewWorkflowConfigLoader returns a loader for the given path. It does not read
+// the file; callers should invoke Get() once at startup to fail fast on a bad
+// path or content.
+func NewWorkflowConfigLoader(path string) *WorkflowConfigLoader {
+	return &WorkflowConfigLoader{path: path}
+}
+
+// Get reads and parses the workflow config from disk. Any read/parse/validation
+// error is returned so a broken ConfigMap is not masked by a stale config.
+func (l *WorkflowConfigLoader) Get() (*WorkflowConfig, error) {
+	return LoadWorkflowConfig(l.path)
+}
+
+// GetWorkflowByName reads the current config from disk and looks up a workflow
+// by name.
+func (l *WorkflowConfigLoader) GetWorkflowByName(name string) (*Workflow, error) {
+	cfg, err := l.Get()
+	if err != nil {
+		return nil, err
+	}
+	return cfg.GetWorkflowByName(name)
+}
