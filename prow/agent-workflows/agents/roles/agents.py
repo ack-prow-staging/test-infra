@@ -20,16 +20,24 @@ subagent definition:
     ack-implementer -> Read, Write, Edit, Grep, Glob, Bash
     ack-reviewer    -> Read, Grep, Glob, Bash
 
-Strands tool equivalents (from strands-agents-tools):
-    Read/Grep/Glob  -> file_read   (also reads & searches)
-    Write           -> file_write
-    Edit            -> editor
-    Bash            -> shell
-    WebFetch        -> http_request
+Strands tool equivalents:
+    Read/Grep/Glob  -> file_read (strands_tools; read-only)
+    Write/Edit      -> file_editor (strands.vended_tools; read + write + edit)
+    Bash            -> shell (strands.vended_tools)
+    WebFetch        -> http_request (strands.vended_tools)
 
-`strands_tools` is imported lazily inside build_agents so this module (and the
-modules that import it) load even where strands-agents-tools is absent — e.g.
-the offline logic tests, which never build real agents.
+We use the vended tools from strands-agents core (`strands.vended_tools`) rather
+than the deprecated `strands_tools` shell/editor. The vended shell/file_editor
+route through the agent's sandbox; since we never pass `sandbox=` to Agent, that
+resolves to `NotASandboxLocalEnvironment`, which runs commands and file ops
+directly on the host (no isolation) — the same behavior the old tools had, which
+is what the on-host `make build-controller`/`git` steps require.
+
+`file_read` is kept for the read-only planner/reviewer roles: it enforces the
+"do not modify files" boundary at the tool level and has no vended read-only
+equivalent (file_editor can write). Tools are imported lazily inside
+build_agents so this module (and its importers) load even where the tool
+packages are absent — e.g. the offline logic tests, which never build agents.
 """
 
 from __future__ import annotations
@@ -95,8 +103,9 @@ def _role_agent(cfg: Config, *, name: str, model_id: str, system_prompt: str, to
 def build_agents(cfg: Config) -> AgentSet:
     """Build the planner/implementer/reviewer agents for one run."""
     # Imported here (not at module top) so importing this module does not require
-    # strands-agents-tools to be installed — see the module docstring.
-    from strands_tools import editor, file_read, file_write, http_request, shell
+    # the tool packages to be installed — see the module docstring.
+    from strands.vended_tools import file_editor, http_request, shell
+    from strands_tools import file_read  # read-only; no vended equivalent yet
 
     ctx = context.for_config(cfg)
 
@@ -114,8 +123,8 @@ def build_agents(cfg: Config) -> AgentSet:
         name="ack-implementer",
         model_id=cfg.implementer_model,
         system_prompt=context.implementer_system_prompt(ctx),
-        # Implementer is the only writer.
-        tools=[file_read, file_write, editor, shell],
+        # Implementer is the only writer. file_editor reads + writes + edits.
+        tools=[file_editor, shell],
     )
 
     plan_reviewer = _role_agent(
