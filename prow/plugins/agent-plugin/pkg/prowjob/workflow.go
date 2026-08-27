@@ -39,11 +39,33 @@ type Workflow struct {
 	Environment            map[string]string        `yaml:"environment,omitempty" json:"environment,omitempty"`
 	EnvironmentFromSecrets map[string]*SecretKeyRef `yaml:"environmentFromSecrets,omitempty" json:"environmentFromSecrets,omitempty"`
 	Resources              *ResourceLimits          `yaml:"resources,omitempty" json:"resources,omitempty"`
+	// ExtraRefs are stable repo dependencies (e.g. code-generator, runtime,
+	// ack-dev-skills) mounted into the workflow pod by Prow's clonerefs init
+	// container. The dynamic service controller is NOT listed here — prow-job.sh
+	// forks and clones it per run. See ExtraRef.
+	ExtraRefs []ExtraRef `yaml:"extra_refs,omitempty" json:"extra_refs,omitempty"`
 }
 
 type SecretKeyRef struct {
 	Name string `yaml:"name" json:"name"`
 	Key  string `yaml:"key" json:"key"`
+}
+
+// ExtraRef declares a stable git repository dependency to clone into the
+// workflow pod as a Prow extra_ref (via the clonerefs init container).
+type ExtraRef struct {
+	Org  string `yaml:"org" json:"org"`
+	Repo string `yaml:"repo" json:"repo"`
+	// BaseRef is the branch/tag/sha to check out. Defaults to "main".
+	BaseRef string `yaml:"base_ref,omitempty" json:"base_ref,omitempty"`
+	// PathAlias overrides the checkout subpath under the clone root. Defaults to
+	// "github.com/<org>/<repo>".
+	PathAlias string `yaml:"path_alias,omitempty" json:"path_alias,omitempty"`
+	// Env, if set, names an environment variable injected into the workflow
+	// container with this ref's absolute checkout path. This keeps the path the
+	// workflow reads (e.g. CODEGEN_DIR) in sync with where clonerefs checks the
+	// repo out — both are derived from the same org/repo/path_alias.
+	Env string `yaml:"env,omitempty" json:"env,omitempty"`
 }
 
 // ResourceLimits defines resource constraints for workflows

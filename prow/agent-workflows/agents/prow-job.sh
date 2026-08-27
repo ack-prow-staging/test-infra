@@ -94,6 +94,12 @@ cd $WORKFLOW_DIR
 # (otherwise the workflow would default CONTROLLER_DIR to the agents package cwd).
 export CONTROLLER_DIR="$SERVICE_REPO_DIR"
 
+# code-generator's `make build-controller` defaults the controller source path to
+# <code-generator>/../<service>-controller, but the fork lives under a different
+# parent ($REPO_ROOT) than the clonerefs-mounted deps. Point it explicitly at the
+# forked checkout so code generation writes into the tree this script commits.
+export SERVICE_CONTROLLER_SOURCE_PATH="$CONTROLLER_DIR"
+
 # code-generator and ack-dev-skills (the role SOPs/schemas) are delivered to this
 # pod as Prow extra_refs cloned by the clonerefs init container. The agent-plugin
 # sets CODEGEN_DIR / ACK_DEV_SKILLS_DIR explicitly; default to the standard

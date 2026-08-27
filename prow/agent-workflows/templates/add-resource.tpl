@@ -16,3 +16,19 @@
         resources:
             cpu: "2"
             memory: "4Gi"
+        # Stable repo dependencies mounted into the pod by Prow's clonerefs init
+        # container. The service controller is NOT listed here — prow-job.sh forks
+        # and clones it dynamically per run. `env` injects each ref's checkout path
+        # so the workflow reads exactly where clonerefs placed the repo.
+        extra_refs:
+            - org: aws-controllers-k8s
+              repo: code-generator
+              base_ref: main
+              env: CODEGEN_DIR
+            - org: aws-controllers-k8s
+              repo: runtime
+              base_ref: main
+            - org: aws-controllers-k8s
+              repo: ack-dev-skills
+              base_ref: main
+              env: ACK_DEV_SKILLS_DIR

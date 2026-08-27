@@ -104,6 +104,13 @@ func (g *DefaultGenerator) CreateWorkflowProwJob(
 		})
 	}
 
+	// Translate the workflow's declared stable repo dependencies into Prow
+	// extra_refs (cloned by the clonerefs init container) and inject each ref's
+	// checkout path as an env var where requested, so the workflow reads the
+	// exact path the repo is cloned to.
+	extraRefs, refEnvVars := buildExtraRefs(workflow.ExtraRefs)
+	envVars = append(envVars, refEnvVars...)
+
 	// Add arguments as command-line flags
 	workflowArgs := make([]string, 0)
 	for key, value := range args {
@@ -167,6 +174,10 @@ func (g *DefaultGenerator) CreateWorkflowProwJob(
 			// registers for the build cluster (see jobs_config.yaml presubmit_cluster).
 			Cluster: "build",
 			Job:     fmt.Sprintf("agent-workflow-%s", workflowName),
+			// Stable repo dependencies (code-generator, runtime, ack-dev-skills,
+			// ...) cloned into the pod by the clonerefs init container. Empty when
+			// the workflow declares no extra_refs.
+			ExtraRefs: extraRefs,
 			// Add decoration config for S3 logs
 			DecorationConfig: &k8s.DecorationConfig{
 				Timeout:     &prowv1.Duration{Duration: timeoutDuration},
@@ -255,4 +266,44 @@ func (g *DefaultGenerator) CreateWorkflowProwJob(
 	}
 
 	return prowJob, nil
+}
+
+// clonerefsSrcRoot is where Prow's clonerefs init container checks out refs
+// under the decorated pod's shared code volume (the upstream default GOPATH src
+// root). Extra-ref checkout paths are computed relative to it.
+const clonerefsSrcRoot = "/home/prow/go/src"
+
+// buildExtraRefs converts a workflow's declared stable repo dependencies into
+// Prow extra_refs and the env vars that expose each ref's checkout path. The
+// checkout path and the ref's PathAlias are derived from the same inputs, so the
+// path the workflow reads cannot drift from where clonerefs clones the repo.
+func buildExtraRefs(refs []ExtraRef) ([]prowv1.Refs, []v1.EnvVar) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	prowRefs := make([]prowv1.Refs, 0, len(refs))
+	envVars := make([]v1.EnvVar, 0, len(refs))
+	for _, r := range refs {
+		baseRef := r.BaseRef
+		if baseRef == "" {
+			baseRef = "main"
+		}
+		pathAlias := r.PathAlias
+		if pathAlias == "" {
+			pathAlias = fmt.Sprintf("github.com/%s/%s", r.Org, r.Repo)
+		}
+		prowRefs = append(prowRefs, prowv1.Refs{
+			Org:       r.Org,
+			Repo:      r.Repo,
+			BaseRef:   baseRef,
+			PathAlias: pathAlias,
+		})
+		if r.Env != "" {
+			envVars = append(envVars, v1.EnvVar{
+				Name:  r.Env,
+				Value: fmt.Sprintf("%s/%s", clonerefsSrcRoot, pathAlias),
+			})
+		}
+	}
+	return prowRefs, envVars
 }
