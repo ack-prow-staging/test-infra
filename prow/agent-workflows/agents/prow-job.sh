@@ -89,6 +89,18 @@ echo "ok"
 
 cd $WORKFLOW_DIR
 
+# Point the role-based workflow at the forked controller checkout this script
+# later commits and pushes, so the Implementer agent edits exactly that tree
+# (otherwise the workflow would default CONTROLLER_DIR to the agents package cwd).
+export CONTROLLER_DIR="$SERVICE_REPO_DIR"
+
+# code-generator and ack-dev-skills (the role SOPs/schemas) are delivered to this
+# pod as Prow extra_refs cloned by the clonerefs init container. The agent-plugin
+# sets CODEGEN_DIR / ACK_DEV_SKILLS_DIR explicitly; default to the standard
+# clonerefs paths here so a manual/local run still resolves them.
+export CODEGEN_DIR="${CODEGEN_DIR:-/home/$JOB_USER/go/src/github.com/aws-controllers-k8s/code-generator}"
+export ACK_DEV_SKILLS_DIR="${ACK_DEV_SKILLS_DIR:-/home/$JOB_USER/go/src/github.com/aws-controllers-k8s/ack-dev-skills}"
+
 # Run the workflow command
 echo "$SCRIPT_NAME][INFO] Starting workflow"
 python -m workflows resource-addition --service $SERVICE --resource $RESOURCE
