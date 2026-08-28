@@ -92,22 +92,11 @@ exit 1
 fi
 echo "ok"
 
-# `gh repo fork` reuses a pre-existing bot fork without syncing it, so the clone
-# can be stale — pinning older runtime/code-generator deps than upstream. Re-base
-# the working tree on the CURRENT source main so the generated code matches the
-# controller's up-to-date dependency pins. Otherwise code-generator@main emits
-# calls to runtime APIs the stale fork's go.mod predates and the controller will
-# not compile (a mismatch that affects every resource, not the added one).
-echo "$SCRIPT_NAME][INFO] Syncing $SERVICE_REPO checkout to current $GITHUB_ORG/$SERVICE_REPO main..."
+# Sync the fork's main with upstream before branching.
 cd "$SERVICE_REPO_DIR"
-SOURCE_URL="https://$GITHUB_TOKEN@github.com/$GITHUB_ORG/$SERVICE_REPO.git"
-git remote add source "$SOURCE_URL" 2>/dev/null || git remote set-url source "$SOURCE_URL"
-if ! git fetch source main >/dev/null 2>&1; then
-  echo "$SCRIPT_NAME][ERROR] failed to fetch $GITHUB_ORG/$SERVICE_REPO main. Exiting "
-  exit 1
-fi
-git reset --hard source/main >/dev/null
-echo "ok"
+gh repo sync "$GITHUB_ACTOR/$SERVICE_REPO" --branch main --force >/dev/null
+git fetch origin main >/dev/null
+git reset --hard origin/main >/dev/null
 
 cd $WORKFLOW_DIR
 
