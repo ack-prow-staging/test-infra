@@ -102,7 +102,7 @@ echo "$SCRIPT_NAME][INFO] Syncing $SERVICE_REPO checkout to current $GITHUB_ORG/
 cd "$SERVICE_REPO_DIR"
 SOURCE_URL="https://$GITHUB_TOKEN@github.com/$GITHUB_ORG/$SERVICE_REPO.git"
 git remote add source "$SOURCE_URL" 2>/dev/null || git remote set-url source "$SOURCE_URL"
-if ! git fetch --depth=1 source main >/dev/null 2>&1; then
+if ! git fetch source main >/dev/null 2>&1; then
   echo "$SCRIPT_NAME][ERROR] failed to fetch $GITHUB_ORG/$SERVICE_REPO main. Exiting "
   exit 1
 fi
