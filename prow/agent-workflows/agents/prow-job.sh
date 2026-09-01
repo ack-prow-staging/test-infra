@@ -160,6 +160,17 @@ if [ "${RUN_E2E,,}" = "true" ]; then
   }
   export ASSUMED_ROLE_ARN
   echo "$SCRIPT_NAME][INFO] Exported ASSUMED_ROLE_ARN for e2e"
+
+  # The e2e harness runs the AWS CLI via `daws` — a nested container inside DinD
+  # that cannot reach the EKS Pod Identity credential endpoint. Resolve this pod's
+  # own (workflow-runner) Pod Identity credentials into static env vars so daws can
+  # authenticate; the harness then assumes ASSUMED_ROLE_ARN from them for the tests.
+  CREDS_ENV=$(aws configure export-credentials --format env) || {
+    echo "$SCRIPT_NAME][ERROR] could not export static AWS credentials for daws; e2e cannot run"
+    exit 1
+  }
+  eval "$CREDS_ENV"
+  echo "$SCRIPT_NAME][INFO] Exported static AWS credentials for daws"
 fi
 
 # Run the workflow command
