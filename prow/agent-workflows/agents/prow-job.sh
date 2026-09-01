@@ -64,7 +64,10 @@ WORKFLOW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JOB_USER="prow"
 SERVICE_REPO=$SERVICE-controller
 ORG_REPO=$GITHUB_ORG/$SERVICE-controller
-REPO_ROOT="/home/$JOB_USER/${TEST_INFRA_ORG}"
+# Clone the controller fork into the same directory clonerefs placed the
+# code-generator / runtime / test-infra extra_refs, so `make kind-test` (via
+# scripts/controller-setup.sh) can resolve them as siblings
+REPO_ROOT="$(dirname "${CODEGEN_DIR:-/home/$JOB_USER/go/src/github.com/aws-controllers-k8s/code-generator}")"
 SERVICE_REPO_DIR="$REPO_ROOT/$SERVICE-controller"
 LOCAL_GIT_BRANCH=$SERVICE-add-$RESOURCE
 PR_SOURCE_BRANCH=$LOCAL_GIT_BRANCH
@@ -145,16 +148,11 @@ if [ "${RUN_E2E,,}" = "true" ]; then
   done
   echo "$SCRIPT_NAME][INFO] Docker-in-Docker ready"
 
-  # Best-effort ECR Public login to dodge anonymous pull rate limits on the base
-  # images the controller build and kind pull.
-  aws ecr-public get-login-password --region us-east-1 \
-    | docker login --username AWS --password-stdin public.ecr.aws >/dev/null 2>&1 || \
-    echo "$SCRIPT_NAME][WARN] ECR Public login failed; continuing"
+  if ! { aws ecr-public get-login-password --region us-east-1 \
+       | docker login --username AWS --password-stdin public.ecr.aws; } >/dev/null 2>&1; then
+    echo "$SCRIPT_NAME][INFO] ECR Public login unavailable; continuing without it"
+  fi
 
-  # The e2e harness (scripts/lib) assumes ASSUMED_ROLE_ARN to create real AWS
-  # resources. It is delivered via SSM (not committed) and resolved from the
-  # pod's workflow-runner identity, which is granted ssm:GetParameter on this
-  # parameter and sts:AssumeRole on the role it names.
   ASSUMED_ROLE_ARN=$(aws ssm get-parameter --name /ack/prow/agent-e2e-role \
     --query Parameter.Value --output text) || {
     echo "$SCRIPT_NAME][ERROR] could not read /ack/prow/agent-e2e-role from SSM; e2e cannot run"

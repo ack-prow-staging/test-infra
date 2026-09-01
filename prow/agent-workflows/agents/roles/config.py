@@ -188,7 +188,14 @@ class Config:
 
     @property
     def test_infra_dir(self) -> Path:
-        """test-infra is a sibling of the controller in the ACK workspace."""
+        """test-infra (Makefile + scripts for `make kind-test`) location.
+
+        Prefer $TEST_INFRA_DIR (set from the test-infra Prow extra_ref); fall
+        back to the sibling of the controller in the ACK workspace layout.
+        """
+        env = _first_env("TEST_INFRA_DIR")
+        if env:
+            return Path(env).expanduser().resolve()
         return self.controller_dir.parent / "test-infra"
 
     # Per-role model ids, falling back to the shared default.

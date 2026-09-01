@@ -107,16 +107,31 @@ class ACKResourceWorkflow:
         print("\n" + "=" * 72)
         print(report)
 
-        error_message = ""
+        # When E2E is enabled it is part of "done": the resource is only complete
+        # if its e2e test actually PASSED. Any other status (FAIL, SKIPPED,
+        # NOT_RUN, ERROR) fails the run so the harness does not open a PR for an
+        # unvalidated resource. When E2E is off, success rests on the Reviewer.
+        e2e_passed = rr.e2e is not None and rr.e2e.status == "PASS"
+        success = rr.approved and (not cfg.run_e2e or e2e_passed)
+
+        problems: list[str] = []
         if not rr.approved:
-            error_message = (
+            problems.append(
                 "Reviewer did not APPROVE the implementation "
-                f"(decision: {rr.impl_decision.value if rr.impl_decision else 'none'}). "
-                "See the report for unresolved items."
+                f"(decision: {rr.impl_decision.value if rr.impl_decision else 'none'})."
             )
+        if cfg.run_e2e and not e2e_passed:
+            status = rr.e2e.status if rr.e2e else "not run"
+            problems.append(
+                f"E2E validation did not pass (status: {status}); a resource is "
+                "not done until its e2e test passes."
+            )
+        error_message = ""
+        if problems:
+            error_message = " ".join(problems) + " See the report for details."
 
         return ResourceAdditionOutput(
-            success=rr.approved,
+            success=success,
             service=cfg.service,
             resource=cfg.resource,
             build_logs=rr.impl_summary_text,

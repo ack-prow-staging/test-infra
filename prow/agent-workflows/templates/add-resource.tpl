@@ -36,3 +36,7 @@
               repo: ack-dev-skills
               base_ref: main
               env: ACK_DEV_SKILLS_DIR
+            - org: aws-controllers-k8s
+              repo: test-infra
+              base_ref: main
+              env: TEST_INFRA_DIR
