@@ -3,6 +3,11 @@
 {{- $publishAccountId := required "publishAccountId is required" .Values.publishAccountId }}
 {{- $region := required "region is required" .Values.region }}
 {{- $stackName := required "stackName is required" .Values.stackName }}
+{{- /* Optional: the dedicated sandbox account whose agent-e2e-test-role the
+       build-cluster agent workflow assumes to run Phase 3 e2e. Empty (the
+       default) omits the e2e assume/SSM grants entirely, so environments that
+       do not run agent e2e are unaffected. */ -}}
+{{- $agentE2eAccountId := .Values.agentE2eAccountId | default "" }}
 ---
 # Deployment Role - used by Prow core components (deck, hook, etc.)
 apiVersion: iam.services.k8s.aws/v1alpha1
@@ -368,13 +373,6 @@ spec:
 # (ack/prow/agent-github-pat-token), never the shared prowjob token or any other
 # ack/prow secret. Bound to the build cluster's test-pods/workflow-runner SA by the
 # ack-build-infra pod-identities chart.
-#
-# BedrockInvoke lets the agent invoke the Claude model on Bedrock (default
-# us.anthropic.claude-opus-4-6-v1, a cross-region inference profile — hence both the
-# foundation-model and inference-profile resources). Scoped to the Anthropic family
-# so a --model override still works; tighten to the exact model id if desired.
-# S3Logs is required for the Prow decoration sidecar to upload build/artifact logs to
-# the prow-logs bucket; it is scoped to that one bucket.
 apiVersion: iam.services.k8s.aws/v1alpha1
 kind: Role
 metadata:
@@ -411,6 +409,30 @@ spec:
           }
         ]
       }
+{{- if $agentE2eAccountId }}
+    AssumeAgentE2ERole: |
+      {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": ["sts:AssumeRole", "sts:TagSession"],
+            "Resource": "arn:aws:iam::{{ $agentE2eAccountId }}:role/agent-e2e-test-role"
+          }
+        ]
+      }
+    SSMAgentE2ERole: |
+      {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": ["ssm:GetParameter"],
+            "Resource": "arn:aws:ssm:{{ $region }}:{{ $accountId }}:parameter/ack/prow/agent-e2e-role"
+          }
+        ]
+      }
+{{- end }}
     BedrockInvoke: |
       {
         "Version": "2012-10-17",
