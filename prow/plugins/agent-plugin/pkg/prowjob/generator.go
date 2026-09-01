@@ -240,6 +240,12 @@ func (g *DefaultGenerator) CreateWorkflowProwJob(
 		},
 	}
 
+	// For e2e-enabled workflows, provision the pod for kind-in-Docker-in-Docker.
+	// Provision the pod for kind-in-Docker-in-Docker when the workflow opts in.
+	if workflow.E2E {
+		applyE2EPodSettings(prowJob.Spec.PodSpec)
+	}
+
 	// Set resource limits if specified
 	if workflow.Resources != nil {
 		container := &prowJob.Spec.PodSpec.Containers[0]
@@ -266,6 +272,47 @@ func (g *DefaultGenerator) CreateWorkflowProwJob(
 	}
 
 	return prowJob, nil
+}
+
+// applyE2EPodSettings provisions the pod for kind-in-Docker-in-Docker. It is the
+// inline equivalent of the preset-dind-enabled and preset-kind-volume-mounts presets
+// (prow/config/templates/config-ConfigMap.yaml) plus the privileged securityContext
+// the integration-test jobs set inline. preset-test-config is not mirrored: roles/e2e.py
+// writes its own test_config.yaml. Safe to call on the single-container PodSpec
+// CreateWorkflowProwJob builds.
+func applyE2EPodSettings(podSpec *v1.PodSpec) {
+	if podSpec == nil || len(podSpec.Containers) == 0 {
+		return
+	}
+	c := &podSpec.Containers[0]
+
+	// Privileged is required for dockerd + kind node containers to run.
+	c.SecurityContext = &v1.SecurityContext{Privileged: Bool(true)}
+
+	// preset-dind-enabled: signal DinD to the harness and give dockerd its
+	// storage. docker-root (/var/lib/docker) is load-bearing for a modern
+	// dockerd; docker-graph is the legacy kubekins path, kept for fidelity.
+	c.Env = append(c.Env,
+		v1.EnvVar{Name: "DOCKER_IN_DOCKER_ENABLED", Value: "true"},
+		// Gate the e2e path in the workflow (roles/config.py reads this).
+		v1.EnvVar{Name: "RUN_E2E", Value: "true"},
+	)
+
+	hostPathDir := v1.HostPathDirectory
+	podSpec.Volumes = append(podSpec.Volumes,
+		v1.Volume{Name: "docker-graph", VolumeSource: v1.VolumeSource{EmptyDir: &v1.EmptyDirVolumeSource{}}},
+		v1.Volume{Name: "docker-root", VolumeSource: v1.VolumeSource{EmptyDir: &v1.EmptyDirVolumeSource{}}},
+		// preset-kind-volume-mounts: kind's nodes need the host's kernel modules
+		// and cgroup hierarchy.
+		v1.Volume{Name: "modules", VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: "/lib/modules", Type: &hostPathDir}}},
+		v1.Volume{Name: "cgroup", VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: "/sys/fs/cgroup", Type: &hostPathDir}}},
+	)
+	c.VolumeMounts = append(c.VolumeMounts,
+		v1.VolumeMount{Name: "docker-graph", MountPath: "/docker-graph"},
+		v1.VolumeMount{Name: "docker-root", MountPath: "/var/lib/docker"},
+		v1.VolumeMount{Name: "modules", MountPath: "/lib/modules", ReadOnly: true},
+		v1.VolumeMount{Name: "cgroup", MountPath: "/sys/fs/cgroup"},
+	)
 }
 
 // clonerefsSrcRoot is where Prow's clonerefs init container checks out refs

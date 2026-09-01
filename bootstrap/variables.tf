@@ -56,7 +56,7 @@ variable "publish_account_id" {
 variable "agent_e2e_account_id" {
   description = <<-EOT
     AWS account ID of the dedicated sandbox that owns the agent-e2e-test-role, which the
-    build-cluster add-resource agent workflow assumes to run Phase 3 e2e against real AWS
+    build-cluster add-resource agent workflow assumes to run e2e against real AWS
     resources. Distinct from the CI test accounts on purpose.
 
     Empty (the default) omits the e2e sts:AssumeRole / ssm:GetParameter grants from the

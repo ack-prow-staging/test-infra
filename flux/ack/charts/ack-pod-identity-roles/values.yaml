@@ -7,6 +7,6 @@ publishAccountId: ""
 region: ""
 stackName: ""
 # Optional: the dedicated sandbox account whose agent-e2e-test-role the build-cluster
-# agent workflow assumes for Phase 3 e2e. Left empty so environments that do not run
+# agent workflow assumes for e2e. Left empty so environments that do not run
 # agent e2e omit the assume/SSM grants entirely (see prow-iam-roles.yaml).
 agentE2eAccountId: ""

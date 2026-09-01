@@ -144,7 +144,7 @@ prompt_all_vars() {
   controllers=$(prompt "ACK controllers for ECR repos (comma-separated)" "$(_default controllers "ecrpublic")")
   publish_account_id=$(prompt "AWS account ID for ECR Public publishing" "$(_default publish_account_id "${account_id}")")
   # Optional sandbox account whose agent-e2e-test-role the build-cluster add-resource
-  # agent assumes for Phase 3 e2e. Blank (the default) omits the e2e IAM grants entirely.
+  # agent assumes for e2e. Blank (the default) omits the e2e IAM grants entirely.
   agent_e2e_account_id=$(prompt "AWS account ID for agent e2e sandbox (blank to disable)" "$(_default agent_e2e_account_id "")")
 
   # Build JSON

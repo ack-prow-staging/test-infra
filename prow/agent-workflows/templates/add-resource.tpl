@@ -15,10 +15,11 @@
             GITHUB_TOKEN:
                 name: agent-github-pat-token
                 key: token
-        timeout: "45m"
+        e2e: true
+        timeout: "90m"
         resources:
-            cpu: "2"
-            memory: "4Gi"
+            cpu: "6"
+            memory: "10Gi"
         # Stable repo dependencies mounted into the pod by Prow's clonerefs init
         # container. The service controller is NOT listed here — prow-job.sh forks
         # and clones it dynamically per run. `env` injects each ref's checkout path

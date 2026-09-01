@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -139,9 +140,10 @@ class ACKResourceWorkflow:
             resource=input_data.resource,
             model_id=input_data.model_id,
             aws_sdk_go_version=input_data.aws_sdk_version,
-            # E2E (Phase 3) is a fast-follow; the build-cluster job has no kind
-            # toolchain yet. Kept off here and toggled on once that lands.
-            run_e2e=False,
+            # Phase 3 (E2E) runs only when RUN_E2E=true. The agent-plugin sets it
+            # (alongside the privileged/DinD pod) for e2e-enabled workflows; off by
+            # default so non-e2e runs and environments without a kind toolchain skip it.
+            run_e2e=os.environ.get("RUN_E2E", "").lower() == "true",
         )
 
 

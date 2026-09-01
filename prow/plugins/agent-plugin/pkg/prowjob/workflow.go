@@ -44,6 +44,12 @@ type Workflow struct {
 	// container. The dynamic service controller is NOT listed here — prow-job.sh
 	// forks and clones it per run. See ExtraRef.
 	ExtraRefs []ExtraRef `yaml:"extra_refs,omitempty" json:"extra_refs,omitempty"`
+	// E2E, when true, has the generator provision the pod for kind-in-Docker-in-Docker:
+	// privileged securityContext, DinD/kind volumes, and RUN_E2E. These mirror the
+	// preset-dind-enabled / preset-kind-volume-mounts presets but must be inlined —
+	// preset merging runs only in Prow's config loader, which submitting ProwJob CRs
+	// directly bypasses.
+	E2E bool `yaml:"e2e,omitempty" json:"e2e,omitempty"`
 }
 
 type SecretKeyRef struct {

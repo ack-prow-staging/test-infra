@@ -100,9 +100,9 @@ git reset --hard origin/main >/dev/null
 
 cd $WORKFLOW_DIR
 
-# Point the role-based workflow at the forked controller checkout this script
-# later commits and pushes, so the Implementer agent edits exactly that tree
-# (otherwise the workflow would default CONTROLLER_DIR to the agents package cwd).
+# Point the workflow at the forked controller checkout this script later commits
+# and pushes, so edits land in exactly that tree (otherwise CONTROLLER_DIR would
+# default to the agents package cwd).
 export CONTROLLER_DIR="$SERVICE_REPO_DIR"
 
 # code-generator's `make build-controller` defaults the controller source path to
@@ -111,12 +111,58 @@ export CONTROLLER_DIR="$SERVICE_REPO_DIR"
 # forked checkout so code generation writes into the tree this script commits.
 export SERVICE_CONTROLLER_SOURCE_PATH="$CONTROLLER_DIR"
 
-# code-generator and ack-dev-skills (the role SOPs/schemas) are delivered to this
-# pod as Prow extra_refs cloned by the clonerefs init container. The agent-plugin
-# sets CODEGEN_DIR / ACK_DEV_SKILLS_DIR explicitly; default to the standard
-# clonerefs paths here so a manual/local run still resolves them.
+# code-generator and ack-dev-skills are delivered to this pod as Prow extra_refs
+# cloned by the clonerefs init container. The agent-plugin sets CODEGEN_DIR /
+# ACK_DEV_SKILLS_DIR explicitly; default to the standard clonerefs paths here so a
+# manual/local run still resolves them.
 export CODEGEN_DIR="${CODEGEN_DIR:-/home/$JOB_USER/go/src/github.com/aws-controllers-k8s/code-generator}"
 export ACK_DEV_SKILLS_DIR="${ACK_DEV_SKILLS_DIR:-/home/$JOB_USER/go/src/github.com/aws-controllers-k8s/ack-dev-skills}"
+
+# E2E setup, only when RUN_E2E=true (the agent-plugin sets it on the e2e pod). The
+# workflow runs `make kind-test` in-process, so Docker and the sandbox test-role
+# must be ready before `python -m workflows` is invoked below.
+if [ "${RUN_E2E,,}" = "true" ]; then
+  export AWS_REGION="${AWS_REGION:-us-west-2}"
+  export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-$AWS_REGION}"
+
+  # Start Docker-in-Docker, mirroring prow/jobs/images/wrapper.sh. The image
+  # disables cgroupfs_mount and forces iptables-legacy so kind's nodes boot here.
+  echo "$SCRIPT_NAME][INFO] RUN_E2E=true: starting Docker-in-Docker..."
+  sysctl net.ipv6.conf.all.disable_ipv6=0 || true
+  sysctl net.ipv6.conf.all.forwarding=1 || true
+  modprobe -v ip6table_nat || true
+  sed -i 's|ulimit -Hn|ulimit -n|' /etc/init.d/docker || true
+  service docker start
+  WAIT_N=0
+  until docker ps -q >/dev/null 2>&1; do
+    if [ "$WAIT_N" -ge 5 ]; then
+      echo "$SCRIPT_NAME][ERROR] Docker daemon did not become ready; e2e cannot run"
+      exit 1
+    fi
+    WAIT_N=$((WAIT_N + 1))
+    echo "$SCRIPT_NAME][INFO] waiting for Docker (${WAIT_N})..."
+    sleep "$WAIT_N"
+  done
+  echo "$SCRIPT_NAME][INFO] Docker-in-Docker ready"
+
+  # Best-effort ECR Public login to dodge anonymous pull rate limits on the base
+  # images the controller build and kind pull.
+  aws ecr-public get-login-password --region us-east-1 \
+    | docker login --username AWS --password-stdin public.ecr.aws >/dev/null 2>&1 || \
+    echo "$SCRIPT_NAME][WARN] ECR Public login failed; continuing"
+
+  # The e2e harness (scripts/lib) assumes ASSUMED_ROLE_ARN to create real AWS
+  # resources. It is delivered via SSM (not committed) and resolved from the
+  # pod's workflow-runner identity, which is granted ssm:GetParameter on this
+  # parameter and sts:AssumeRole on the role it names.
+  ASSUMED_ROLE_ARN=$(aws ssm get-parameter --name /ack/prow/agent-e2e-role \
+    --query Parameter.Value --output text) || {
+    echo "$SCRIPT_NAME][ERROR] could not read /ack/prow/agent-e2e-role from SSM; e2e cannot run"
+    exit 1
+  }
+  export ASSUMED_ROLE_ARN
+  echo "$SCRIPT_NAME][INFO] Exported ASSUMED_ROLE_ARN for e2e"
+fi
 
 # Run the workflow command
 echo "$SCRIPT_NAME][INFO] Starting workflow"
@@ -152,7 +198,7 @@ echo "$SCRIPT_NAME][INFO] Creating a new pull request for $ORG_REPO , from $PR_S
 if ! gh pr create -R "$ORG_REPO" -t "$COMMIT_MSG" -b "ACK Agent changes adding $RESOURCE to $SERVICE-controller" -B "$PR_TARGET_BRANCH" >/dev/null ; then
   echo ""
   echo "gh.sh][ERROR] Failed to create pull request. Exiting... "
-  return 1
+  exit 1
 fi
 echo "ok"
 
