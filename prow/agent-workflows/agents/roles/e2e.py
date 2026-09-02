@@ -43,12 +43,29 @@ _DEFAULT_E2E_TIMEOUT_S = 45 * 60
 
 
 @dataclass
+class E2EAttempt:
+    """One `make kind-test` run and, if it failed and wasn't the last, the fix
+    the implementer produced in response."""
+
+    number: int
+    status: str
+    failure_excerpt: str = ""
+    log_path: str = ""
+    # The implementer's response to this attempt's failure (empty on the final
+    # attempt or a PASS, where no fix is dispatched).
+    fix_summary: str = ""
+
+
+@dataclass
 class E2EResult:
     status: str  # "PASS" | "FAIL" | "SKIPPED" | "NOT_RUN" | "ERROR"
     detail: str = ""
     attempts: int = 0
     artifacts_dir: str = ""
     fix_summaries: list[str] = field(default_factory=list)
+    # One record per make kind-test run, in order — carries each run's outcome,
+    # the extracted failure, the full-log artifact path, and the agent's fix.
+    attempts_detail: list[E2EAttempt] = field(default_factory=list)
 
 
 def _to_snake(resource: str) -> str:
@@ -133,6 +150,29 @@ def _classify(stdout: str, returncode: int) -> str:
     return "FAIL"
 
 
+def _extract_failure(combined: str, max_lines: int = 120) -> str:
+    """Pull the actionable failure out of a full `make kind-test` log.
+
+    Prefer the pytest FAILURES / short-test-summary section (the actual assertion
+    that failed) over a blind tail, which is usually docker-build noise. Falls
+    back to the last `max_lines` when there is no recognizable pytest section
+    (e.g. the run failed before pytest — kind bring-up, controller build, creds).
+    """
+    lines = combined.splitlines()
+    start = None
+    for i, ln in enumerate(lines):
+        low = ln.lower()
+        if "= failures =" in low or "= errors =" in low or "short test summary" in low:
+            start = i
+            break
+    excerpt = lines[start:] if start is not None else lines[-max_lines:]
+    if len(excerpt) > max_lines:
+        excerpt = excerpt[:max_lines] + [
+            "... (truncated; full output in $ARTIFACTS/e2e-attempt-*.log)"
+        ]
+    return "\n".join(excerpt).strip()
+
+
 def _run_make_kind_test(cfg: Config, artifacts: Path) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["ARTIFACTS"] = str(artifacts)
@@ -183,34 +223,60 @@ def run_e2e(cfg: Config, agents: AgentSet) -> E2EResult:
     max_runs = cfg.max_e2e_fix_attempts + 1
     for attempt in range(1, max_runs + 1):
         result.attempts = attempt
+        print(f"[e2e] attempt {attempt}/{max_runs}: running `make kind-test`...", flush=True)
+        rec = E2EAttempt(number=attempt, status="ERROR")
+        result.attempts_detail.append(rec)
         try:
             proc = _run_make_kind_test(cfg, artifacts)
         except subprocess.TimeoutExpired as exc:
-            result.status = "ERROR"
-            result.detail = f"make kind-test timed out after {exc.timeout}s on attempt {attempt}"
+            rec.status = result.status = "ERROR"
+            rec.failure_excerpt = result.detail = (
+                f"make kind-test timed out after {exc.timeout}s on attempt {attempt}"
+            )
+            print(f"[e2e] attempt {attempt}: ERROR (timeout)", flush=True)
             return result
         except FileNotFoundError:
-            result.status = "ERROR"
-            result.detail = "`make` not found — is the test-infra toolchain installed?"
+            rec.status = result.status = "ERROR"
+            rec.failure_excerpt = result.detail = (
+                "`make` not found — is the test-infra toolchain installed?"
+            )
             return result
 
         combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        # Persist the FULL run output so failures are debuggable post-mortem
+        # (Prow uploads $ARTIFACTS to S3); result.detail only carries an excerpt.
+        log_path = artifacts / f"e2e-attempt-{attempt}.log"
+        try:
+            log_path.write_text(combined)
+            rec.log_path = str(log_path)
+        except OSError:
+            pass
+
         status = _classify(combined, proc.returncode)
-        tail = "\n".join(combined.splitlines()[-60:])
+        rec.status = status
+        excerpt = _extract_failure(combined) if status != "PASS" else ""
+        rec.failure_excerpt = excerpt
         result.status = status
-        result.detail = tail
+        result.detail = excerpt or status
+        print(f"[e2e] attempt {attempt}: {status}"
+              + (f" (full log: {log_path})" if rec.log_path else ""), flush=True)
 
         if status == "PASS":
             return result
 
         if attempt >= max_runs:
             result.detail = (
-                f"E2E still {status} after {attempt} attempt(s); escalating to user.\n\n{tail}"
+                f"E2E still {status} after {attempt} attempt(s); escalating to user.\n\n{excerpt}"
             )
+            print(f"[e2e] exhausted {max_runs} attempt(s) still {status}; escalating.", flush=True)
             return result
 
-        # Dispatch the implementer to fix, then loop to re-run.
-        fix = agents.implementer(_fix_prompt(cfg, status, tail, artifacts))
-        result.fix_summaries.append(str(fix))
+        # Dispatch the implementer to fix (with the extracted failure, not blind
+        # build noise), record its response, then loop to re-run.
+        print(f"[e2e] attempt {attempt} {status}; dispatching implementer to fix...", flush=True)
+        fix = str(agents.implementer(_fix_prompt(cfg, status, excerpt, artifacts)))
+        rec.fix_summary = fix
+        result.fix_summaries.append(fix)
+        print(f"[e2e] implementer responded ({len(fix)} chars); re-running.", flush=True)
 
     return result

@@ -75,6 +75,10 @@ class AgentSet:
     # because a Strands graph node maps to exactly one executor.
     plan_reviewer: Agent
     impl_reviewer: Agent
+    # Lightweight summarizer that composes the PR description from text already
+    # gathered (plan/impl/review/e2e). No tools. Optional so callers that build
+    # an AgentSet directly (e.g. tests) need not supply it.
+    pr_writer: Agent | None = None
 
 
 def _role_agent(cfg: Config, *, name: str, model_id: str, system_prompt: str, tools: list) -> Agent:
@@ -144,9 +148,30 @@ def build_agents(cfg: Config) -> AgentSet:
         tools=[file_read, shell],
     )
 
+    # No tools: it summarizes text passed in the prompt, never touches the repo.
+    pr_writer = _role_agent(
+        cfg,
+        name="ack-pr-writer",
+        model_id=cfg.reviewer_model,
+        system_prompt=(
+            "You write concise, reader-facing GitHub pull request descriptions for "
+            "ACK service-controller changes that add a new resource. You are given "
+            "the implementation plan, the implementer's change summary, the "
+            "reviewer's verdict, and the e2e result. Output GitHub-flavored markdown "
+            "only, with no preamble. Structure it as: a 2-3 sentence summary of what "
+            "was added; a '## Key design decisions' bulleted list drawn from the plan "
+            "(CRUD operation mapping, immutable and ignored/deprecated fields, tags "
+            "handling, custom hooks, terminal error codes) — include only decisions "
+            "that actually apply; and a short '## Testing' line with the e2e result. "
+            "Be factual and terse; never invent details not present in the inputs."
+        ),
+        tools=[],
+    )
+
     return AgentSet(
         planner=planner,
         implementer=implementer,
         plan_reviewer=plan_reviewer,
         impl_reviewer=impl_reviewer,
+        pr_writer=pr_writer,
     )

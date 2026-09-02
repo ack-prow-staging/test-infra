@@ -121,6 +121,10 @@ export SERVICE_CONTROLLER_SOURCE_PATH="$CONTROLLER_DIR"
 export CODEGEN_DIR="${CODEGEN_DIR:-/home/$JOB_USER/go/src/github.com/aws-controllers-k8s/code-generator}"
 export ACK_DEV_SKILLS_DIR="${ACK_DEV_SKILLS_DIR:-/home/$JOB_USER/go/src/github.com/aws-controllers-k8s/ack-dev-skills}"
 
+# Where the workflow writes the composed PR description; used for `gh pr create
+# -F` below (falls back to a static body if the workflow didn't produce one).
+export PR_BODY_FILE="${PR_BODY_FILE:-/tmp/ack-pr-body.md}"
+
 # E2E setup, only when RUN_E2E=true (the agent-plugin sets it on the e2e pod). The
 # workflow runs `make kind-test` in-process, so Docker and the sandbox test-role
 # must be ready before `python -m workflows` is invoked below.
@@ -204,7 +208,14 @@ git branch "$LOCAL_GIT_BRANCH" --set-upstream-to origin/"$PR_SOURCE_BRANCH" >/de
 git pull --rebase >/dev/null
 
 echo "$SCRIPT_NAME][INFO] Creating a new pull request for $ORG_REPO , from $PR_SOURCE_BRANCH -> $PR_TARGET_BRANCH branch... "
-if ! gh pr create -R "$ORG_REPO" -t "$COMMIT_MSG" -b "ACK Agent changes adding $RESOURCE to $SERVICE-controller" -B "$PR_TARGET_BRANCH" >/dev/null ; then
+# Prefer the workflow-composed PR description (summary + key design decisions);
+# fall back to a static body if it wasn't produced.
+if [ -s "$PR_BODY_FILE" ]; then
+  PR_BODY_ARGS=(-F "$PR_BODY_FILE")
+else
+  PR_BODY_ARGS=(-b "ACK Agent changes adding $RESOURCE to $SERVICE-controller")
+fi
+if ! gh pr create -R "$ORG_REPO" -t "$COMMIT_MSG" "${PR_BODY_ARGS[@]}" -B "$PR_TARGET_BRANCH" >/dev/null ; then
   echo ""
   echo "gh.sh][ERROR] Failed to create pull request. Exiting... "
   exit 1

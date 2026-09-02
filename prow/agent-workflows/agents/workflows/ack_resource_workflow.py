@@ -30,6 +30,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from config.defaults import DEFAULT_MODEL_ID
@@ -106,6 +107,18 @@ class ACKResourceWorkflow:
         report = orchestrator.completion_report(rr)
         print("\n" + "=" * 72)
         print(report)
+
+        # Hand the composed PR description to prow-job.sh (it reads $PR_BODY_FILE
+        # for `gh pr create -F`). Only set on a successful run, which is the only
+        # case a PR is opened; a write failure is non-fatal (falls back to the
+        # static body in the shell wrapper).
+        if rr.pr_body:
+            pr_body_file = os.environ.get("PR_BODY_FILE")
+            if pr_body_file:
+                try:
+                    Path(pr_body_file).write_text(rr.pr_body)
+                except OSError as exc:
+                    logger.warning("could not write PR body to %s: %s", pr_body_file, exc)
 
         # When E2E is enabled it is part of "done": the resource is only complete
         # if its e2e test actually PASSED. Any other status (FAIL, SKIPPED,
