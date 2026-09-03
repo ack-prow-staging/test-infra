@@ -132,21 +132,26 @@ def ensure_test_config(cfg: Config) -> tuple[bool, str]:
 
 
 def _classify(stdout: str, returncode: int) -> str:
-    """Classify pytest/make output into PASS / FAIL / SKIPPED."""
-    text = stdout.lower()
-    # pytest summary line forms: "1 passed", "2 failed, 1 passed", "3 skipped"
-    failed = bool(re.search(r"\b\d+\s+failed\b", text)) or "error" in text and returncode != 0
-    skipped_only = bool(re.search(r"\b\d+\s+skipped\b", text)) and not re.search(
-        r"\b\d+\s+passed\b", text
-    )
-    if returncode != 0 or failed:
+    """Classify make kind-test output into PASS / FAIL / SKIPPED.
+
+    The exit code is authoritative for failure: a pytest failure always
+    propagates non-zero up through `make kind-test`, so `returncode != 0` never
+    misses one. The pytest summary is consulted only on a clean exit, to tell
+    PASS from a SKIPPED-only run.
+
+    (The old `\\d+ failed` / "error"-substring heuristic was dropped: it was
+    redundant with the returncode check and mis-fired on the common "0 failed"
+    pytest summary form.)
+    """
+    if returncode != 0:
         return "FAIL"
-    if skipped_only:
+    text = stdout.lower()
+    if re.search(r"\b\d+\s+skipped\b", text) and not re.search(r"\b\d+\s+passed\b", text):
         # Per the workflow, skipped tests added by this workflow are failures.
         return "SKIPPED"
     if re.search(r"\b\d+\s+passed\b", text):
         return "PASS"
-    # Ambiguous output with rc==0 and no recognizable summary.
+    # Clean exit but no recognizable pytest summary — treat as a failure.
     return "FAIL"
 
 
@@ -243,22 +248,26 @@ def run_e2e(cfg: Config, agents: AgentSet) -> E2EResult:
             return result
 
         combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        # Persist the FULL run output so failures are debuggable post-mortem
-        # (Prow uploads $ARTIFACTS to S3); result.detail only carries an excerpt.
+        status = _classify(combined, proc.returncode)
+        rec.status = status
+        # Persist the FULL run output plus the exit code / verdict so a non-zero
+        # `make kind-test` is debuggable even when it prints no error (e.g. a
+        # silent `set -e` abort or an EXIT-trap exit-code override). The harness
+        # ERR trap logs the failing command into `combined`; this footer records
+        # the resulting exit code. Prow uploads $ARTIFACTS to S3.
         log_path = artifacts / f"e2e-attempt-{attempt}.log"
+        footer = f"\n=== make kind-test exit={proc.returncode} classified={status} ===\n"
         try:
-            log_path.write_text(combined)
+            log_path.write_text(combined + footer)
             rec.log_path = str(log_path)
         except OSError:
             pass
 
-        status = _classify(combined, proc.returncode)
-        rec.status = status
         excerpt = _extract_failure(combined) if status != "PASS" else ""
         rec.failure_excerpt = excerpt
         result.status = status
         result.detail = excerpt or status
-        print(f"[e2e] attempt {attempt}: {status}"
+        print(f"[e2e] attempt {attempt}: {status} (exit={proc.returncode})"
               + (f" (full log: {log_path})" if rec.log_path else ""), flush=True)
 
         if status == "PASS":

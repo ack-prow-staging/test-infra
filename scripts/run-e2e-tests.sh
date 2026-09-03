@@ -6,6 +6,12 @@
 
 set -Eeo pipefail
 
+# On any command that trips `errexit`, print the failing command, its source
+# line, and exit code before the shell unwinds — so a non-zero `make kind-test`
+# is never silent. `set -E` propagates this ERR trap into functions/subshells,
+# including the sourced controller-setup.sh / pytest-local-runner.sh helpers.
+trap 'rc=$?; echo "[run-e2e-tests] ERR: \"$BASH_COMMAND\" exited $rc at ${BASH_SOURCE##*/}:${LINENO}" >&2' ERR
+
 SCRIPTS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 ROOT_DIR="$SCRIPTS_DIR/.."
 
