@@ -41,6 +41,16 @@ from .config import Config
 # Default: 45 minutes. E2E runs are 10-30+ minutes per the references.
 _DEFAULT_E2E_TIMEOUT_S = 45 * 60
 
+# pytest colorizes its summary ("\x1b[32m2 passed\x1b[0m"). The color escape
+# leaves a letter (e.g. the `m` of `\x1b[32m`) immediately before the digit,
+# which defeats the `\b` word boundary in the summary regexes below and made a
+# genuinely-passing run classify as FAIL. Strip escapes before matching.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
 
 @dataclass
 class E2EAttempt:
@@ -145,7 +155,7 @@ def _classify(stdout: str, returncode: int) -> str:
     """
     if returncode != 0:
         return "FAIL"
-    text = stdout.lower()
+    text = _strip_ansi(stdout).lower()
     if re.search(r"\b\d+\s+skipped\b", text) and not re.search(r"\b\d+\s+passed\b", text):
         # Per the workflow, skipped tests added by this workflow are failures.
         return "SKIPPED"
@@ -163,7 +173,7 @@ def _extract_failure(combined: str, max_lines: int = 120) -> str:
     back to the last `max_lines` when there is no recognizable pytest section
     (e.g. the run failed before pytest — kind bring-up, controller build, creds).
     """
-    lines = combined.splitlines()
+    lines = _strip_ansi(combined).splitlines()
     start = None
     for i, ln in enumerate(lines):
         low = ln.lower()

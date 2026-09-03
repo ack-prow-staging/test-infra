@@ -116,6 +116,12 @@ def test_e2e_classify():
     check("failed rc", _classify("== 1 failed, 2 passed ==", 1), "FAIL")
     check("skipped only", _classify("== 2 skipped ==", 0), "SKIPPED")
     check("skipped+passed -> pass", _classify("1 passed, 1 skipped", 0), "PASS")
+    # pytest colorizes its summary; the color escape leaves a letter right before
+    # the digit ("\x1b[32m2 passed"), which defeated the \b in the passed regex
+    # and made a green run classify FAIL. Regression: strip ANSI before matching.
+    check("ansi passed -> pass",
+          _classify("==== \x1b[32m2 passed\x1b[0m, \x1b[33m34 warnings\x1b[0m in 63s ====", 0),
+          "PASS")
 
 
 def test_conditions():
