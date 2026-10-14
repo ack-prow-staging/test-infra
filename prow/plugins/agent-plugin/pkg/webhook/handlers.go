@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 
 	cmd "github.com/aws-controllers-k8s/test-infra/experimental/prow/pkg/command"
 	"sigs.k8s.io/prow/pkg/github"
@@ -54,6 +55,18 @@ func (s *Server) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		if err := s.handleIssueEvent(&event); err != nil {
 			log.Printf("Failed to handle issue event: %v", err)
 			http.Error(w, fmt.Sprintf("Failed to handle issue: %v", err), http.StatusInternalServerError)
+			return
+		}
+	case "pull_request_review":
+		var event github.ReviewEvent
+		if err := json.Unmarshal(payload, &event); err != nil {
+			log.Printf("Failed to parse pull request review event: %v", err)
+			http.Error(w, "Failed to parse event", http.StatusBadRequest)
+			return
+		}
+		if err := s.handlePullRequestReview(&event); err != nil {
+			log.Printf("Failed to handle pull request review: %v", err)
+			http.Error(w, fmt.Sprintf("Failed to handle review: %v", err), http.StatusInternalServerError)
 			return
 		}
 	default:
@@ -115,6 +128,53 @@ func (s *Server) handleIssueEvent(event *github.IssueEvent) error {
 	return s.processAgentCommand(body, repo, issue, func(message string) error {
 		return s.githubClient.CreateComment(org, repo.Name, issue.Number, message)
 	})
+}
+
+// handlePullRequestReview processes reviews submitted on agent-authored PRs
+func (s *Server) handlePullRequestReview(event *github.ReviewEvent) error {
+	ok, err := s.isAllowedAgentReview(event)
+	if err != nil || !ok {
+		return err
+	}
+
+	// TODO: react to the review, e.g. start a workflow that addresses the feedback.
+	log.Printf("Accepted %s review from %s on agent PR %s#%d",
+		event.Review.State, event.Review.User.Login, event.Repo.FullName, event.PullRequest.Number)
+	return nil
+}
+
+// isAllowedAgentReview reports whether the event is a newly submitted,
+// non-approval review on a PR authored by the configured PR author, from a
+// reviewer who is a member of the allowed team.
+func (s *Server) isAllowedAgentReview(event *github.ReviewEvent) (bool, error) {
+	// Only react to new reviews. On "dismissed", Review.User is the original
+	// reviewer rather than whoever dismissed it, so the team check below would
+	// vouch for the wrong person.
+	if event.Action != github.ReviewActionSubmitted {
+		return false, nil
+	}
+
+	// Approvals need no follow-up from the agent. Webhooks send the state in
+	// lowercase ("approved"), while Prow's constants are uppercase.
+	if github.ReviewState(strings.ToUpper(string(event.Review.State))) == github.ReviewStateApproved {
+		return false, nil
+	}
+
+	if github.NormLogin(event.PullRequest.User.Login) != github.NormLogin(s.prAuthor) {
+		return false, nil
+	}
+
+	org := event.Repo.Owner.Login
+	reviewer := event.Review.User.Login
+	ok, err := s.githubClient.TeamBySlugHasMember(org, s.allowedTeam, reviewer)
+	if err != nil {
+		return false, fmt.Errorf("failed to check if user is a team member: %v", err)
+	}
+	if !ok {
+		log.Printf("Ignoring review from non-team member: %s", reviewer)
+		return false, nil
+	}
+	return true, nil
 }
 
 // processAgentCommand handles the common logic for processing /agent commands

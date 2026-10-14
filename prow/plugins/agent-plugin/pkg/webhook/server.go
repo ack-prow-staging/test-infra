@@ -44,6 +44,7 @@ type Server struct {
 	k8sProwClient    k8sclient.Client
 	prowJobNamespace string
 	allowedTeam      string
+	prAuthor         string
 	s3BucketName     string
 }
 
@@ -54,6 +55,7 @@ func NewServer(
 	githubClient githubClient,
 	tokenGenerator func() []byte,
 	allowedTeam string,
+	prAuthor string,
 	s3BucketName string,
 ) (*Server, error) {
 	prowJobNamespace := os.Getenv("PROW_JOB_NAMESPACE")
@@ -82,6 +84,7 @@ func NewServer(
 		k8sProwClient:    k8sProwClient,
 		prowJobNamespace: prowJobNamespace,
 		allowedTeam:      allowedTeam,
+		prAuthor:         prAuthor,
 		s3BucketName:     s3BucketName,
 	}, nil
 }
