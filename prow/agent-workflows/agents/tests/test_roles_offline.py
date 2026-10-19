@@ -769,6 +769,26 @@ def test_workflow_timeout_budget():
         )
 
 
+def test_generator_templates_helmignored():
+    """Every generator template must be listed in the chart's .helmignore.
+
+    The generator's .tpl files share templates/ with the Argo CD Helm chart.
+    Helm renders every file there that .helmignore does not exclude, and a
+    generator template fails to render with `nil pointer evaluating
+    interface {}.ImageRepo`, so one missing entry breaks the chart.
+    """
+    print("generator templates helmignored:")
+    chart = _PKG_ROOT.parent
+    ignored = {
+        line.strip()
+        for line in (chart / ".helmignore").read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+    for tpl in sorted((chart / "templates").glob("*.tpl")):
+        rel = f"templates/{tpl.name}"
+        check(f"{rel} in .helmignore", rel in ignored, True)
+
+
 def main():
     for fn in (test_bedrock_sampling_config,
                test_verdict, test_snake, test_e2e_classify, test_conditions,
@@ -782,7 +802,8 @@ def main():
                test_reporting_no_verdict_vs_revise,
                test_progress_reporter,
                test_ensure_test_config,
-               test_workflow_timeout_budget):
+               test_workflow_timeout_budget,
+               test_generator_templates_helmignored):
         fn()
     print("\nALL OFFLINE TESTS PASSED")
 
