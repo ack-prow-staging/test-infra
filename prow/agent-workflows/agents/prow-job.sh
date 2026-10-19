@@ -354,10 +354,13 @@ if [ "$WORKFLOW_NAME" = "address-feedback" ]; then
 
   cd "$SERVICE_REPO_DIR"
   # Same rule as roles/e2e.py controller_has_changes: regeneration rewrites
-  # ack-generate-metadata.yaml on every run, so it alone is not a change.
-  # Captured rather than piped into `grep -q`, which can exit early and fail
-  # the pipeline under pipefail.
-  CHANGES=$(git status --porcelain | grep -vE 'ack-generate-metadata\.yaml"?$' || true)
+  # ack-generate-metadata.yaml and pkg/version/version.go with code-generator
+  # build info on every run, so on their own they are not a change. The
+  # pattern must match REGEN_ONLY_PATHS there. Porcelain lines are "XY path";
+  # cut drops the status columns. Captured rather than piped into `grep -q`,
+  # which can exit early and fail the pipeline under pipefail.
+  CHANGES=$(git status --porcelain | cut -c4- \
+    | grep -vE '^(apis/[^/]+/ack-generate-metadata\.yaml|pkg/version/version\.go)$' || true)
   if [ -n "$CHANGES" ]; then
     echo "$SCRIPT_NAME][INFO] Committing changes..."
     git add -A >/dev/null

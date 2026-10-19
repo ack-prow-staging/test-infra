@@ -41,7 +41,14 @@ if str(_PKG_ROOT) not in sys.path:
 
 from roles import graph as gm
 from roles.config import Config
-from roles.e2e import E2EResult, _classify, _to_snake, controller_has_changes, ensure_test_config
+from roles.e2e import (
+    REGEN_ONLY_PATHS,
+    E2EResult,
+    _classify,
+    _to_snake,
+    controller_has_changes,
+    ensure_test_config,
+)
 from roles.verdict import Decision, parse_decision
 from roles.workflow import ADD_FIELD, ADD_RESOURCE, ADDRESS_FEEDBACK
 from workflows.validation import validate_inputs
@@ -372,8 +379,14 @@ def test_controller_has_changes():
     try:
         repo = tmp / "svc-controller"
         (repo / "apis" / "v1alpha1").mkdir(parents=True)
+        (repo / "pkg" / "version").mkdir(parents=True)
+        (repo / "pkg" / "resource" / "r").mkdir(parents=True)
         metadata = repo / "apis" / "v1alpha1" / "ack-generate-metadata.yaml"
         metadata.write_text("build_date: one\n")
+        version_go = repo / "pkg" / "version" / "version.go"
+        version_go.write_text('const ACKGenerateBuildDate = "one"\n')
+        other_version_go = repo / "pkg" / "resource" / "r" / "version.go"
+        other_version_go.write_text("package r\n")
         (repo / "generator.yaml").write_text("resources: {}\n")
 
         def git(*args):
@@ -388,6 +401,11 @@ def test_controller_has_changes():
         check("clean tree", controller_has_changes(cfg), False)
         metadata.write_text("build_date: two\n")
         check("metadata-only change ignored", controller_has_changes(cfg), False)
+        version_go.write_text('const ACKGenerateBuildDate = "two"\n')
+        check("metadata + version.go change ignored", controller_has_changes(cfg), False)
+        other_version_go.write_text("package r // changed\n")
+        check("version.go outside pkg/version detected", controller_has_changes(cfg), True)
+        git("checkout", "-q", "--", str(other_version_go.relative_to(repo)))
         (repo / "generator.yaml").write_text("resources: {Foo: {}}\n")
         check("tracked change detected", controller_has_changes(cfg), True)
         git("checkout", "-q", "--", "generator.yaml")
@@ -399,6 +417,11 @@ def test_controller_has_changes():
         check("git failure runs e2e", controller_has_changes(missing), True)
     finally:
         _sh.rmtree(tmp)
+
+    # prow-job.sh decides whether to commit with the same pattern.
+    script = (_PKG_ROOT / "prow-job.sh").read_text()
+    check("prow-job.sh uses REGEN_ONLY_PATHS",
+          f"grep -vE '{REGEN_ONLY_PATHS}'" in script, True)
 
     check("PASS is ok", E2EResult(status="PASS").ok, True)
     check("NOT_NEEDED is ok", E2EResult(status="NOT_NEEDED").ok, True)

@@ -86,16 +86,19 @@ class E2EResult:
         return self.status in ("PASS", "NOT_NEEDED")
 
 
-# Regeneration rewrites this file's build metadata (code-generator version,
-# build date) even when nothing else changes, so on its own it is not a change.
-_GENERATE_METADATA_FILE = "ack-generate-metadata.yaml"
+# Files that regeneration rewrites with code-generator build info (version,
+# build date) even when the generated code is otherwise identical, so on their
+# own they are not a change. Paths are relative to the controller repo root.
+# prow-job.sh applies the same pattern before committing; keep the two in sync.
+REGEN_ONLY_PATHS = r"^(apis/[^/]+/ack-generate-metadata\.yaml|pkg/version/version\.go)$"
+_REGEN_ONLY_RE = re.compile(REGEN_ONLY_PATHS)
 
 
 def controller_has_changes(cfg: Config) -> bool:
     """Whether the controller checkout has changes worth an e2e run.
 
-    Compares the working tree with its checked-out commit, ignoring
-    ack-generate-metadata.yaml. Returns True when git cannot answer, so an
+    Compares the working tree with its checked-out commit, ignoring the
+    files in REGEN_ONLY_PATHS. Returns True when git cannot answer, so an
     unexpected error runs e2e instead of skipping it.
     """
     try:
@@ -114,7 +117,7 @@ def controller_has_changes(cfg: Config) -> bool:
         # Porcelain v1: two status columns, a space, then the path. A rename
         # is shown as "old -> new"; check the new path.
         path = line[3:].split(" -> ")[-1].strip().strip('"')
-        if path and not path.endswith(_GENERATE_METADATA_FILE):
+        if path and not _REGEN_ONLY_RE.match(path):
             return True
     return False
 
