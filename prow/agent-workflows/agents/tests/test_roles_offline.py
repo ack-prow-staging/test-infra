@@ -41,9 +41,9 @@ if str(_PKG_ROOT) not in sys.path:
 
 from roles import graph as gm
 from roles.config import Config
-from roles.e2e import _classify, _to_snake, ensure_test_config
+from roles.e2e import E2EResult, _classify, _to_snake, controller_has_changes, ensure_test_config
 from roles.verdict import Decision, parse_decision
-from roles.workflow import ADD_FIELD, ADD_RESOURCE
+from roles.workflow import ADD_FIELD, ADD_RESOURCE, ADDRESS_FEEDBACK
 from workflows.validation import validate_inputs
 
 # ack-dev-skills is a peer of test-infra in the ACK workspace. _PKG_ROOT is
@@ -275,6 +275,136 @@ def test_field_config_and_context():
         print("  [skip] ack-dev-skills not present at", SKILLS)
 
 
+def test_feedback_config_and_context():
+    print("feedback config + context:")
+    feedback_env = {
+        "PR_URL": "https://github.com/o/cloudwatch-controller/pull/5",
+        "PR_BASE_SHA": "abc123",
+        "FEEDBACK_FILE": "/tmp/feedback.md",
+    }
+    with patch.dict(os.environ, feedback_env):
+        cfg = Config.resolve(
+            service="cloudwatch",
+            resource="InsightRule",
+            workflow=ADDRESS_FEEDBACK,
+            controller_dir="/tmp/cloudwatch-controller",
+            codegen_dir="/tmp/code-generator",
+            skills_dir=str(SKILLS),
+        )
+    check("workflow name", cfg.workflow_name, "address-feedback")
+    check("inputs read from environment", cfg.inputs, feedback_env)
+    check("no input problems", cfg.input_problems(), [])
+
+    with patch.dict(os.environ, {"PR_URL": "", "PR_BASE_SHA": "", "FEEDBACK_FILE": ""}):
+        missing = Config.resolve(
+            service="cloudwatch",
+            resource="InsightRule",
+            workflow=ADDRESS_FEEDBACK,
+            controller_dir="/tmp/c",
+            codegen_dir="/tmp/g",
+            skills_dir=str(SKILLS),
+        )
+    check("missing inputs reported", len(missing.input_problems()), 3)
+    check(
+        "explicit inputs win",
+        Config.resolve(
+            service="s", resource="R", workflow=ADDRESS_FEEDBACK,
+            controller_dir="/tmp/c", codegen_dir="/tmp/g", skills_dir=str(SKILLS),
+            inputs={"PR_URL": "u", "PR_BASE_SHA": "s", "FEEDBACK_FILE": "f"},
+        ).input_problems(),
+        [],
+    )
+    check(
+        "add-resource needs no inputs",
+        Config.resolve(service="s", resource="R", controller_dir="/tmp/c",
+                       codegen_dir="/tmp/g", skills_dir=str(SKILLS)).input_problems(),
+        [],
+    )
+
+    from roles import context, orchestrator
+
+    task = orchestrator.build_task_prompt(cfg)
+    check("task contains feedback file", "FEEDBACK_FILE=/tmp/feedback.md" in task, True)
+    check("task contains base sha", "PR_BASE_SHA=abc123" in task, True)
+    check("task has no FIELD without a field", "FIELD=" in task, False)
+    field_cfg = Config.resolve(
+        service="cloudwatch", resource="InsightRule", workflow=ADDRESS_FEEDBACK,
+        field="ruleState", controller_dir="/tmp/c", codegen_dir="/tmp/g",
+        skills_dir=str(SKILLS), inputs=feedback_env,
+    )
+    check(
+        "task shows FIELD when given",
+        "FIELD=ruleState" in orchestrator.build_task_prompt(field_cfg),
+        True,
+    )
+    resource_cfg = Config.resolve(service="s", resource="R", controller_dir="/tmp/c",
+                                  codegen_dir="/tmp/g", skills_dir=str(SKILLS))
+    check(
+        "add-resource task unchanged by inputs",
+        "FEEDBACK_FILE" in orchestrator.build_task_prompt(resource_cfg),
+        False,
+    )
+
+    if SKILLS.is_dir():
+        ctx = context.for_config(cfg)
+        planner = context.planner_system_prompt(ctx, cfg.workflow)
+        implementer = context.implementer_system_prompt(ctx, cfg.workflow)
+        reviewer = context.reviewer_system_prompt(ctx, cfg.workflow, mode="impl")
+        check("feedback planner frame", "ACK Feedback Planner" in planner, True)
+        check("inline planner SOP", "Feedback Planner Role" in planner, True)
+        check("inline plan schema", "Feedback Plan Output Schema" in planner, True)
+        check("implementer feedback mode", "address pull request review feedback" in implementer, True)
+        check("implementer gets feedback schema", "Feedback Plan Output Schema" in implementer, True)
+        check("reviewer feedback mode", "address pull request review feedback" in reviewer, True)
+        # Existing roles still come from ack-dev-skills.
+        check("reviewer SOP from ack-dev-skills", ctx.role("reviewer") == (SKILLS / "roles" / "reviewer.md").read_text(), True)
+    else:
+        print("  [skip] ack-dev-skills not present at", SKILLS)
+
+
+def test_controller_has_changes():
+    """E2E is skipped only when nothing but generate metadata changed."""
+    print("controller_has_changes:")
+    import subprocess
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        repo = tmp / "svc-controller"
+        (repo / "apis" / "v1alpha1").mkdir(parents=True)
+        metadata = repo / "apis" / "v1alpha1" / "ack-generate-metadata.yaml"
+        metadata.write_text("build_date: one\n")
+        (repo / "generator.yaml").write_text("resources: {}\n")
+
+        def git(*args):
+            subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+        git("init", "-q")
+        git("-c", "user.name=t", "-c", "user.email=t@example.com", "add", ".")
+        git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "init")
+        cfg = Config.resolve(service="svc", resource="R", controller_dir=str(repo),
+                             codegen_dir=str(tmp / "cg"), skills_dir=str(SKILLS))
+
+        check("clean tree", controller_has_changes(cfg), False)
+        metadata.write_text("build_date: two\n")
+        check("metadata-only change ignored", controller_has_changes(cfg), False)
+        (repo / "generator.yaml").write_text("resources: {Foo: {}}\n")
+        check("tracked change detected", controller_has_changes(cfg), True)
+        git("checkout", "-q", "--", "generator.yaml")
+        (repo / "test_new.py").write_text("x = 1\n")
+        check("untracked file detected", controller_has_changes(cfg), True)
+        missing = Config.resolve(service="svc", resource="R",
+                                 controller_dir=str(tmp / "absent"),
+                                 codegen_dir=str(tmp / "cg"), skills_dir=str(SKILLS))
+        check("git failure runs e2e", controller_has_changes(missing), True)
+    finally:
+        _sh.rmtree(tmp)
+
+    check("PASS is ok", E2EResult(status="PASS").ok, True)
+    check("NOT_NEEDED is ok", E2EResult(status="NOT_NEEDED").ok, True)
+    check("FAIL is not ok", E2EResult(status="FAIL").ok, False)
+    check("SKIPPED is not ok", E2EResult(status="SKIPPED").ok, False)
+
+
 def test_workflow_input_validation():
     print("workflow input validation:")
     check(
@@ -403,6 +533,19 @@ def test_workflow_adapters():
     check("field definition selected", field_request.definition, ADD_FIELD)
     check("nested field preserved", field_request.field, field_path)
 
+    from workflows.ack_feedback_workflow import ACKFeedbackWorkflow, FeedbackInput
+
+    feedback_runner = FakeRunner()
+    feedback_result = asyncio.run(
+        ACKFeedbackWorkflow(feedback_runner).run(
+            FeedbackInput(service="cloudwatch", resource="InsightRule")
+        )
+    )
+    feedback_request = feedback_runner.requests[0]
+    check("feedback adapter succeeds", feedback_result.success, True)
+    check("feedback definition selected", feedback_request.definition, ADDRESS_FEEDBACK)
+    check("feedback field optional", feedback_request.field, None)
+
 
 def test_reporting_no_verdict_vs_revise():
     """Regression: empty reviewer output must report as 'no verdict', not REVISE."""
@@ -498,6 +641,8 @@ def main():
                test_verdict, test_snake, test_e2e_classify, test_conditions,
                test_replan_no_double_impl, test_config_and_context,
                test_field_config_and_context,
+               test_feedback_config_and_context,
+               test_controller_has_changes,
                test_workflow_input_validation,
                test_workflow_adapters,
                test_reporting_no_verdict_vs_revise,

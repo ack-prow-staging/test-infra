@@ -68,7 +68,10 @@ class E2EAttempt:
 
 @dataclass
 class E2EResult:
-    status: str  # "PASS" | "FAIL" | "SKIPPED" | "NOT_RUN" | "ERROR"
+    # "PASS" | "FAIL" | "SKIPPED" | "NOT_RUN" | "ERROR" | "NOT_NEEDED"
+    # NOT_NEEDED means the run made no controller changes, so there was
+    # nothing new to test (for example a review that only needed replies).
+    status: str
     detail: str = ""
     attempts: int = 0
     artifacts_dir: str = ""
@@ -76,6 +79,44 @@ class E2EResult:
     # One record per make kind-test run, in order — carries each run's outcome,
     # the extracted failure, the full-log artifact path, and the agent's fix.
     attempts_detail: list[E2EAttempt] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        """Whether this result lets the workflow succeed."""
+        return self.status in ("PASS", "NOT_NEEDED")
+
+
+# Regeneration rewrites this file's build metadata (code-generator version,
+# build date) even when nothing else changes, so on its own it is not a change.
+_GENERATE_METADATA_FILE = "ack-generate-metadata.yaml"
+
+
+def controller_has_changes(cfg: Config) -> bool:
+    """Whether the controller checkout has changes worth an e2e run.
+
+    Compares the working tree with its checked-out commit, ignoring
+    ack-generate-metadata.yaml. Returns True when git cannot answer, so an
+    unexpected error runs e2e instead of skipping it.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(cfg.controller_dir),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    if proc.returncode != 0:
+        return True
+    for line in proc.stdout.splitlines():
+        # Porcelain v1: two status columns, a space, then the path. A rename
+        # is shown as "old -> new"; check the new path.
+        path = line[3:].split(" -> ")[-1].strip().strip('"')
+        if path and not path.endswith(_GENERATE_METADATA_FILE):
+            return True
+    return False
 
 
 def _to_snake(resource: str) -> str:
