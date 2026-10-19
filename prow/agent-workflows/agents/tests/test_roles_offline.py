@@ -48,6 +48,7 @@ from roles.e2e import (
     _to_snake,
     controller_has_changes,
     ensure_test_config,
+    head_sha,
 )
 from roles.verdict import Decision, parse_decision
 from roles.workflow import ADD_FIELD, ADD_RESOURCE, ADDRESS_FEEDBACK
@@ -335,6 +336,9 @@ def test_feedback_config_and_context():
     check("task contains feedback file", "FEEDBACK_FILE=/tmp/feedback.md" in task, True)
     check("task contains base sha", "PR_BASE_SHA=abc123" in task, True)
     check("task has no FIELD without a field", "FIELD=" in task, False)
+    check("task diff includes working tree", "PR_BASE_SHA..HEAD" in task, False)
+    check("feedback mode forbids commits", "do not run `git commit`" in ADDRESS_FEEDBACK.role_instruction, True)
+    check("feedback mode overrides squash guidance", "squash commits and force-push do not apply" in ADDRESS_FEEDBACK.role_instruction, True)
     field_cfg = Config.resolve(
         service="cloudwatch", resource="InsightRule", workflow=ADDRESS_FEEDBACK,
         field="ruleState", controller_dir="/tmp/c", codegen_dir="/tmp/g",
@@ -392,29 +396,46 @@ def test_controller_has_changes():
         def git(*args):
             subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
 
+        def commit(*args):
+            git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", *args)
+
         git("init", "-q")
-        git("-c", "user.name=t", "-c", "user.email=t@example.com", "add", ".")
-        git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "init")
+        git("add", ".")
+        commit("-m", "init")
         cfg = Config.resolve(service="svc", resource="R", controller_dir=str(repo),
                              codegen_dir=str(tmp / "cg"), skills_dir=str(SKILLS))
+        start = head_sha(cfg)
+        check("head sha read", bool(start), True)
 
-        check("clean tree", controller_has_changes(cfg), False)
+        check("clean tree", controller_has_changes(cfg, start), False)
         metadata.write_text("build_date: two\n")
-        check("metadata-only change ignored", controller_has_changes(cfg), False)
+        check("metadata-only change ignored", controller_has_changes(cfg, start), False)
         version_go.write_text('const ACKGenerateBuildDate = "two"\n')
-        check("metadata + version.go change ignored", controller_has_changes(cfg), False)
+        check("metadata + version.go change ignored", controller_has_changes(cfg, start), False)
         other_version_go.write_text("package r // changed\n")
-        check("version.go outside pkg/version detected", controller_has_changes(cfg), True)
+        check("version.go outside pkg/version detected", controller_has_changes(cfg, start), True)
         git("checkout", "-q", "--", str(other_version_go.relative_to(repo)))
         (repo / "generator.yaml").write_text("resources: {Foo: {}}\n")
-        check("tracked change detected", controller_has_changes(cfg), True)
+        check("tracked change detected", controller_has_changes(cfg, start), True)
         git("checkout", "-q", "--", "generator.yaml")
         (repo / "test_new.py").write_text("x = 1\n")
-        check("untracked file detected", controller_has_changes(cfg), True)
+        check("untracked file detected", controller_has_changes(cfg, start), True)
+        (repo / "test_new.py").unlink()
+
+        # An agent that commits or amends must not hide its changes. Amending
+        # the starting commit also leaves `start` off the current history.
+        commit("-a", "--amend", "-m", "init")
+        check("amended regen-only change ignored", controller_has_changes(cfg, start), False)
+        (repo / "generator.yaml").write_text("resources: {Foo: {}}\n")
+        commit("-a", "-m", "agent commit")
+        check("committed change detected", controller_has_changes(cfg, start), True)
+        check("clean tree vs new HEAD", controller_has_changes(cfg, head_sha(cfg)), False)
+        check("unknown start runs e2e", controller_has_changes(cfg, None), True)
+
         missing = Config.resolve(service="svc", resource="R",
                                  controller_dir=str(tmp / "absent"),
                                  codegen_dir=str(tmp / "cg"), skills_dir=str(SKILLS))
-        check("git failure runs e2e", controller_has_changes(missing), True)
+        check("git failure runs e2e", controller_has_changes(missing, start), True)
     finally:
         _sh.rmtree(tmp)
 

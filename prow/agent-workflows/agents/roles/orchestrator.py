@@ -162,6 +162,10 @@ def run(
     run_result = RunResult(cfg=cfg)
     reporter = ProgressReporter(verbose=verbose) if (progress or verbose) else None
 
+    # The commit the agents start from. The e2e skip check compares against
+    # it, so changes an agent committed or amended still count as changes.
+    start_sha = e2e.head_sha(cfg)
+
     # --- Phases 1, 1.5, 2: the Strands graph ---------------------------------
     gres = asyncio.run(_run_graph(cfg, graph, reporter))
     run_result.graph_result = gres
@@ -198,7 +202,7 @@ def run(
         )
 
     # --- Phase 3: E2E testing ------------------------------------------------
-    if cfg.run_e2e and not e2e.controller_has_changes(cfg):
+    if cfg.run_e2e and not e2e.controller_has_changes(cfg, start_sha):
         run_result.e2e = e2e.E2EResult(
             status="NOT_NEEDED",
             detail="The run made no controller changes, so there was nothing new to test.",

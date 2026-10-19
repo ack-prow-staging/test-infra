@@ -35,14 +35,14 @@ and specify that change precisely enough for the Implementer to apply it.
   Items are grouped into the review that triggered this run, unresolved review
   threads, and pull request conversation comments.
 - PR_BASE_SHA: the commit the pull request branched from. From CONTROLLER_DIR,
-  `git diff PR_BASE_SHA..HEAD` shows everything the pull request changes.
+  `git diff PR_BASE_SHA` shows everything the pull request changes.
 - CONTROLLER_DIR is checked out at the pull request head, which already
   contains the original change.
 
 ## Methodology
 
 1. Read FEEDBACK_FILE in full.
-2. Read the pull request diff. Start with `git diff --stat PR_BASE_SHA..HEAD`,
+2. Read the pull request diff. Start with `git diff --stat PR_BASE_SHA`,
    then read the non-generated files you need. Never read generated files
    (apis/, pkg/resource/, config/crd/, helm/) in full.
 3. Classify every feedback item as exactly one of:

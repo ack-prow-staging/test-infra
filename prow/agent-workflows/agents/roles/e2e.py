@@ -94,29 +94,47 @@ REGEN_ONLY_PATHS = r"^(apis/[^/]+/ack-generate-metadata\.yaml|pkg/version/versio
 _REGEN_ONLY_RE = re.compile(REGEN_ONLY_PATHS)
 
 
-def controller_has_changes(cfg: Config) -> bool:
-    """Whether the controller checkout has changes worth an e2e run.
-
-    Compares the working tree with its checked-out commit, ignoring the
-    files in REGEN_ONLY_PATHS. Returns True when git cannot answer, so an
-    unexpected error runs e2e instead of skipping it.
-    """
+def _git(cfg: Config, *args: str) -> str | None:
+    """Run git in the controller checkout. Returns stdout, or None on failure."""
     try:
         proc = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", *args],
             cwd=str(cfg.controller_dir),
             capture_output=True,
             text=True,
             timeout=60,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return True
+        return None
     if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def head_sha(cfg: Config) -> str | None:
+    """The controller checkout's current commit, or None if git cannot say."""
+    out = _git(cfg, "rev-parse", "HEAD")
+    return out.strip() if out else None
+
+
+def controller_has_changes(cfg: Config, since: str | None) -> bool:
+    """Whether the controller checkout has changes worth an e2e run.
+
+    Compares the working tree, plus untracked files, with `since`: the commit
+    the run started from. Comparing with the starting commit rather than the
+    current HEAD means a change still counts if an agent committed or amended
+    it. Files in REGEN_ONLY_PATHS are ignored. Returns True when `since` is
+    unknown or git cannot answer, so an unexpected error runs e2e instead of
+    skipping it.
+    """
+    if not since:
         return True
-    for line in proc.stdout.splitlines():
-        # Porcelain v1: two status columns, a space, then the path. A rename
-        # is shown as "old -> new"; check the new path.
-        path = line[3:].split(" -> ")[-1].strip().strip('"')
+    changed = _git(cfg, "diff", "--name-only", "--no-renames", since, "--")
+    untracked = _git(cfg, "ls-files", "--others", "--exclude-standard")
+    if changed is None or untracked is None:
+        return True
+    for path in (changed + untracked).splitlines():
+        path = path.strip()
         if path and not _REGEN_ONLY_RE.match(path):
             return True
     return False

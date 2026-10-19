@@ -353,6 +353,14 @@ if [ "$WORKFLOW_NAME" = "address-feedback" ]; then
   echo "$SCRIPT_NAME][INFO] $WORKFLOW_LABEL workflow completed successfully"
 
   cd "$SERVICE_REPO_DIR"
+  # The agents are told to leave their changes uncommitted. If one committed
+  # or amended anyway, HEAD is no longer the PR head: an amended HEAD cannot
+  # be pushed without --force, and the check below would see a clean tree.
+  # A soft reset keeps every change, staged, on top of the PR head.
+  if [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ]; then
+    echo "$SCRIPT_NAME][INFO] the workflow moved HEAD off ${HEAD_SHA:0:7}; folding its commits into one new commit"
+    git reset --soft "$HEAD_SHA"
+  fi
   # Same rule as roles/e2e.py controller_has_changes: regeneration rewrites
   # ack-generate-metadata.yaml and pkg/version/version.go with code-generator
   # build info on every run, so on their own they are not a change. The
