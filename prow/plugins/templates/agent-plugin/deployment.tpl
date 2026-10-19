@@ -29,7 +29,7 @@ spec:
         args:
         - --port=8080
         - --allowed-team=ack-agent-users
-        - --pr-author=ack-agent
+        - --pr-author=ack-test-agent
         - --s3-bucket-name=s3://${STACK_NAME}-prow-logs-${ACCOUNT_ID}
         - --github-app-id=$(GITHUB_APP_ID)
         - --github-app-private-key-path=/etc/github/cert
