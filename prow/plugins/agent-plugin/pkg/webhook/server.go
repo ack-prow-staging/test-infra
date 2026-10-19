@@ -18,9 +18,11 @@ import (
 	"context"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
+	"sigs.k8s.io/prow/pkg/github"
 
 	k8sclient "github.com/aws-controllers-k8s/test-infra/experimental/prow/pkg/k8s"
 	prowjobpkg "github.com/aws-controllers-k8s/test-infra/experimental/prow/pkg/prowjob"
@@ -32,6 +34,7 @@ const DefaultTimeout = 30 * time.Second
 type githubClient interface {
 	CreateComment(org, repo string, number int, comment string) error
 	TeamBySlugHasMember(org string, teamSlug string, memberLogin string) (bool, error)
+	ListTeamMembersBySlug(org, teamSlug, role string) ([]github.TeamMember, error)
 }
 
 // Server handles webhook requests
@@ -46,6 +49,8 @@ type Server struct {
 	allowedTeam      string
 	prAuthor         string
 	s3BucketName     string
+	// feedbackMu serializes starting address-feedback jobs; see startFeedbackRun.
+	feedbackMu sync.Mutex
 }
 
 // NewServer creates a new webhook server

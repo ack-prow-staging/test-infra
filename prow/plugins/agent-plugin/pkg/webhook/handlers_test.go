@@ -25,10 +25,22 @@ type fakeGitHubClient struct {
 	teamMembers map[string]bool
 	teamErr     error
 	teamLookups int
+	// members is what ListTeamMembersBySlug returns.
+	members  []string
+	comments []string
 }
 
-func (f *fakeGitHubClient) CreateComment(_, _ string, _ int, _ string) error {
+func (f *fakeGitHubClient) CreateComment(_, _ string, _ int, comment string) error {
+	f.comments = append(f.comments, comment)
 	return nil
+}
+
+func (f *fakeGitHubClient) ListTeamMembersBySlug(_, _, _ string) ([]github.TeamMember, error) {
+	out := make([]github.TeamMember, 0, len(f.members))
+	for _, m := range f.members {
+		out = append(out, github.TeamMember{Login: m})
+	}
+	return out, nil
 }
 
 func (f *fakeGitHubClient) TeamBySlugHasMember(_, _, memberLogin string) (bool, error) {

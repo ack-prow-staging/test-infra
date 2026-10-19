@@ -59,12 +59,24 @@ func (s *Server) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	case "pull_request_review":
 		var event github.ReviewEvent
+		// Prow's github.Review has no commit_id, so read it separately: it is
+		// the commit the review was made against.
+		var reviewCommit struct {
+			Review struct {
+				CommitID string `json:"commit_id"`
+			} `json:"review"`
+		}
 		if err := json.Unmarshal(payload, &event); err != nil {
 			log.Printf("Failed to parse pull request review event: %v", err)
 			http.Error(w, "Failed to parse event", http.StatusBadRequest)
 			return
 		}
-		if err := s.handlePullRequestReview(&event); err != nil {
+		if err := json.Unmarshal(payload, &reviewCommit); err != nil {
+			log.Printf("Failed to parse pull request review event: %v", err)
+			http.Error(w, "Failed to parse event", http.StatusBadRequest)
+			return
+		}
+		if err := s.handlePullRequestReview(&event, reviewCommit.Review.CommitID); err != nil {
 			log.Printf("Failed to handle pull request review: %v", err)
 			http.Error(w, fmt.Sprintf("Failed to handle review: %v", err), http.StatusInternalServerError)
 			return
@@ -130,17 +142,17 @@ func (s *Server) handleIssueEvent(event *github.IssueEvent) error {
 	})
 }
 
-// handlePullRequestReview processes reviews submitted on agent-authored PRs
-func (s *Server) handlePullRequestReview(event *github.ReviewEvent) error {
+// handlePullRequestReview starts an address-feedback run for a review
+// submitted on an agent-authored PR. reviewSHA is the reviewed commit.
+func (s *Server) handlePullRequestReview(event *github.ReviewEvent, reviewSHA string) error {
 	ok, err := s.isAllowedAgentReview(event)
 	if err != nil || !ok {
 		return err
 	}
 
-	// TODO: react to the review, e.g. start a workflow that addresses the feedback.
 	log.Printf("Accepted %s review from %s on agent PR %s#%d",
 		event.Review.State, event.Review.User.Login, event.Repo.FullName, event.PullRequest.Number)
-	return nil
+	return s.startFeedbackRun(event, reviewSHA)
 }
 
 // isAllowedAgentReview reports whether the event is a newly submitted,
@@ -191,6 +203,12 @@ func (s *Server) processAgentCommand(
 
 	log.Printf("Processing agent command: workflow=%s, args=%v, flags=%v, issue=#%d",
 		agentCmd.WorkflowName, agentCmd.Args, agentCmd.Flags, issue.Number)
+
+	if agentCmd.WorkflowName == addressFeedbackWorkflow {
+		return postComment(fmt.Sprintf(
+			"Workflow `%s` starts from pull request reviews and can't be run with /agent.",
+			addressFeedbackWorkflow))
+	}
 
 	workflow, err := s.workflowConfig.GetWorkflowByName(agentCmd.WorkflowName)
 	if err != nil {
