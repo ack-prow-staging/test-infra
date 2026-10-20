@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -126,6 +127,15 @@ class ACKWorkflowRunner:
                     Path(pr_body_file).write_text(run_result.pr_body)
                 except OSError as exc:
                     logger.warning("could not write PR body to %s: %s", pr_body_file, exc)
+
+        # prow-job.sh's address-feedback path posts these as review thread
+        # replies. Missing replies only mean no thread replies are posted.
+        replies_file = os.environ.get("FEEDBACK_REPLIES_FILE")
+        if run_result.item_replies and replies_file:
+            try:
+                Path(replies_file).write_text(json.dumps(run_result.item_replies, indent=2) + "\n")
+            except OSError as exc:
+                logger.warning("could not write replies to %s: %s", replies_file, exc)
 
         e2e_passed = run_result.e2e is not None and run_result.e2e.ok
         success = run_result.approved and (not cfg.run_e2e or e2e_passed)

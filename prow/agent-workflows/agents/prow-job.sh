@@ -232,17 +232,22 @@ if [ "$WORKFLOW_NAME" = "address-feedback" ]; then
   # Collect the feedback here, not in the agents, so the agents never call
   # GitHub and only allowed authors' text reaches them.
   FEEDBACK_FILE="${FEEDBACK_FILE:-/tmp/ack-feedback.md}"
+  # Review threads the job may reply in, chosen here before the agents run.
+  FEEDBACK_TARGETS_FILE="/tmp/ack-feedback-targets.json"
   FEEDBACK_COUNT=$(python "$WORKFLOW_DIR/workflows/feedback.py" \
     --owner "$REPO_OWNER" --repo "$REPO_NAME" --number "$PR_NUMBER" \
     --review-id "$REVIEW_ID" --team-members "$TEAM_MEMBERS" \
-    --pr-author "$PR_AUTHOR" --output "$FEEDBACK_FILE")
+    --pr-author "$PR_AUTHOR" --output "$FEEDBACK_FILE" \
+    --targets-output "$FEEDBACK_TARGETS_FILE")
   echo "$SCRIPT_NAME][INFO] collected $FEEDBACK_COUNT feedback item(s) into $FEEDBACK_FILE"
   if [ "$FEEDBACK_COUNT" = "0" ]; then
     echo "$SCRIPT_NAME][INFO] no unresolved feedback from team members; nothing to do"
     pr_comment -b "The agent found no unresolved feedback from team members to address."
     exit 0
   fi
-  export PR_URL PR_BASE_SHA FEEDBACK_FILE
+  # The harness writes the reply writer's per-item replies here.
+  FEEDBACK_REPLIES_FILE="/tmp/ack-feedback-replies.json"
+  export PR_URL PR_BASE_SHA FEEDBACK_FILE FEEDBACK_REPLIES_FILE
 else
   # Create a fork of the repository
   echo "$SCRIPT_NAME][INFO] forking and cloning $GITHUB_ORG/$SERVICE_REPO... "
@@ -385,6 +390,16 @@ if [ "$WORKFLOW_NAME" = "address-feedback" ]; then
     STATUS_LINE="Pushed $PUSHED_SHA to address this feedback."
   else
     STATUS_LINE="No code changes were needed for this feedback."
+  fi
+
+  # Reply in the review threads this run addressed. Reached only after a
+  # successful push or a run with no code change, so a reply never describes
+  # a commit that did not land. reply.py answers only threads feedback.py
+  # listed, and a failed reply does not fail the job.
+  if [ -s "$FEEDBACK_REPLIES_FILE" ] && [ -s "$FEEDBACK_TARGETS_FILE" ]; then
+    THREAD_REPLIES=$(python "$WORKFLOW_DIR/workflows/reply.py" \
+      --targets "$FEEDBACK_TARGETS_FILE" --replies "$FEEDBACK_REPLIES_FILE") || THREAD_REPLIES=0
+    echo "$SCRIPT_NAME][INFO] Posted $THREAD_REPLIES review thread reply(ies)"
   fi
 
   # The marker tells workflows/feedback.py where the next run's conversation

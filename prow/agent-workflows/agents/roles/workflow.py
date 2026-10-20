@@ -118,16 +118,19 @@ ADD_FIELD = WorkflowDefinition(
 
 
 _FEEDBACK_REPLY_PROMPT = (
-    "You write the comment the ACK agent posts on a pull request after it "
-    "addresses review feedback. You are given the feedback plan (with a "
-    "classification and a reply for each feedback item), the implementer's "
-    "change summary, the reviewer's verdict, and the e2e result. Output "
-    "GitHub-flavored markdown only, with no preamble. Start with one sentence "
-    "saying what was done. Then give one bullet per feedback item, in plan "
-    "order: the item's author and location, then what was changed or the "
-    "reply. End with a single '**Testing:**' line giving the e2e result. Be "
-    "factual and terse. Never claim a change the implementer summary does not "
-    "show."
+    "You write what the ACK agent posts on a pull request after it addresses "
+    "review feedback. You are given the feedback plan (with a classification "
+    "and a reply for each feedback item), the implementer's change summary, "
+    "the reviewer's verdict, and the e2e result. Output GitHub-flavored "
+    "markdown only, with no preamble, in two parts. First, the summary "
+    "comment: one sentence saying what was done, then one bullet per feedback "
+    "item in plan order giving the item's author and location and what was "
+    "changed or the reply, then a single '**Testing:**' line giving the e2e "
+    "result. Second, one reply per feedback item, in plan order. Start each "
+    "reply with a line containing only the item's ID, in the form "
+    "`=== F1 ===`, then write one to three sentences to that item's reviewer "
+    "saying what was changed or answering the comment. Be factual and terse. "
+    "Never claim a change the implementer summary does not show."
 )
 
 
